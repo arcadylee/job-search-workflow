@@ -1,0 +1,63 @@
+name: Daily Job Search
+on:
+  schedule:
+    # PST 早上7点 = UTC 下午3点 (UTC+8)
+    # PDT 早上7点 = UTC 下午2点 (UTC+7)
+    # 为了覆盖两种情况，我们在 UTC 14:00 和 15:00 都运行，然后在脚本中检查实际时区
+    - cron: '0 14 * * *'  # PDT 时间早上7点
+    - cron: '0 15 * * *'  # PST 时间早上7点
+  workflow_dispatch:  # 允许手动触发测试
+
+jobs:
+  job-search:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Check timezone and skip if not 7 AM
+      id: check_time
+      run: |
+        current_hour=$(TZ='America/Los_Angeles' date +'%H')
+        echo "Current hour in Pacific Time: $current_hour"
+        if [ "$current_hour" == "07" ]; then
+          echo "It's 7 AM Pacific Time! Running job search..."
+          echo "run_job=true" >> $GITHUB_OUTPUT
+        else
+          echo "Not 7 AM Pacific Time, skipping..."
+          echo "run_job=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Install dependencies
+      if: steps.check_time.outputs.run_job == 'true'
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run job search script
+      if: steps.check_time.outputs.run_job == 'true'
+      env:
+        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
+        RESUME_PATH: ${{ secrets.RESUME_PATH }}
+      run: |
+        python job_search.py
+    
+    - name: Upload logs
+      if: always() && steps.check_time.outputs.run_job == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: job-search-logs-${{ github.run_number }}
+        path: |
+          *.log
+          jobs_*.json
+        retention-days: 30
