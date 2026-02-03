@@ -152,7 +152,7 @@ class JobScraper:
         return jobs
     
     def _parse_indeed_results(self, html: str) -> List[Dict[str, Any]]:
-        """解析 Indeed HTML 结果"""
+        """解析 Indeed HTML 结果，直接在列表页提取尽可能完整的 description"""
         jobs = []
         soup = BeautifulSoup(html, 'lxml')
         
@@ -171,13 +171,45 @@ class JobScraper:
                 company = company_elem.get_text(strip=True) if company_elem else 'Unknown'
                 location = location_elem.get_text(strip=True) if location_elem else 'Unknown'
                 
-                # 获取职位链接并转换为真正的详情页 URL
+                # 获取职位链接（改用 /viewjob?jk= 格式）
                 link_elem = title_elem.find('a')
                 raw_href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else ''
                 job_link = self._extract_indeed_detail_url(raw_href)
                 
-                snippet_elem = card.find('div', class_='job-snippet')
-                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
+                # 在列表页提取更完整的 description（多层策略）
+                description = ''
+                
+                # 策略 1: 找 card 里所有 class 包含 'snippet' 的 div，合并内容
+                snippet_divs = card.find_all('div', class_=lambda c: c and 'snippet' in str(c).lower())
+                if snippet_divs:
+                    description = '\n'.join([d.get_text(separator=' ', strip=True) for d in snippet_divs])
+                
+                # 策略 2: 如果还是太短，找 card 下所有 <ul> 的内容（职位要求列表）
+                if len(description) < 100:
+                    ul_items = []
+                    for ul in card.find_all('ul'):
+                        for li in ul.find_all('li'):
+                            text = li.get_text(strip=True)
+                            if text and len(text) > 10:
+                                ul_items.append(text)
+                    if ul_items:
+                        description = (description + '\n' + '\n'.join(ul_items)).strip()
+                
+                # 策略 3: 如果仍然很短，取 card 本身除了标题/公司/地点之外的所有文本
+                if len(description) < 100:
+                    card_text = card.get_text(separator='\n', strip=True)
+                    # 移除标题、公司、地点（这些已经单独提取了）
+                    for remove in [title, company, location]:
+                        card_text = card_text.replace(remove, '')
+                    # 清理后如果还有内容，就用
+                    card_text = '\n'.join([l.strip() for l in card_text.split('\n') if len(l.strip()) > 20])
+                    if len(card_text) > 50:
+                        description = card_text
+                
+                # 策略 4: 兜底，至少保留 job-snippet 的短预览
+                if not description:
+                    snippet_elem = card.find('div', class_='job-snippet')
+                    description = snippet_elem.get_text(strip=True) if snippet_elem else ''
                 
                 jobs.append({
                     'source': 'Indeed',
@@ -185,7 +217,7 @@ class JobScraper:
                     'company': company,
                     'location': location,
                     'url': job_link,
-                    'description': snippet,
+                    'description': description,
                     'posted_date': datetime.now().isoformat()
                 })
                 
@@ -196,13 +228,14 @@ class JobScraper:
         return jobs
     
     def _extract_indeed_detail_url(self, href: str) -> str:
-        """从 Indeed 的 href 中提取真正的岗位详情页 URL
+        """从 Indeed 的 href 中提取岗位详情页 URL
         
         Indeed 返回的 href 有两种：
         - /rc/clk?jk=XXXXX&...   → 普通跳转链接
         - /pagead/clk?...&mo=r   → 广告跳转链接（没有 jk，无法提取）
         
-        需要从里面提取 jk 参数，拼成：https://ca.indeed.com/jobs/details/{jk}
+        从里面提取 jk 参数，拼成 Indeed 标准详情页格式：
+        https://ca.indeed.com/viewjob?jk={jk}
         """
         from urllib.parse import urlparse, parse_qs
         
@@ -218,7 +251,8 @@ class JobScraper:
             # 从 query string 里拿 jk 参数
             jk = qs.get('jk', [None])[0]
             if jk:
-                return f'https://ca.indeed.com/jobs/details/{jk}'
+                # 用 /viewjob?jk= 格式，这是 Indeed 标准的详情页路由
+                return f'https://ca.indeed.com/viewjob?jk={jk}'
             
             # /pagead/clk 没有 jk，拿不到详情页，返回空
             logger.debug(f"  无法从 Indeed URL 提取 jk: {href[:80]}")
@@ -386,17 +420,36 @@ class JobScraper:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'lxml')
                 
-                # 策略 1: 找 class 精确包含 'description__text' 的元素
+                # 策略 1（最可靠）: 找 "About the job" 标题，取它所在容器或后续兄弟的内容
+                for elem in soup.find_all(True):
+                    text = elem.get_text(strip=True).lower()
+                    if 'about the job' in text and len(text) < 50:  # 标题本身很短
+                        # 先试父容器
+                        parent = elem.parent
+                        if parent:
+                            parent_text = parent.get_text(separator='\n', strip=True)
+                            # 排除标题本身，只要实质内容
+                            if len(parent_text) > 200:
+                                logger.debug(f"  LinkedIn: 命中 'About the job' 父容器")
+                                return parent_text
+                        # 再试后续兄弟
+                        for sibling in elem.find_next_siblings():
+                            sibling_text = sibling.get_text(separator='\n', strip=True)
+                            if len(sibling_text) > 100:
+                                logger.debug(f"  LinkedIn: 命中 'About the job' 后续内容")
+                                return sibling_text
+                
+                # 策略 2: 找 class 精确包含 'description__text' 的元素
                 for elem in soup.find_all(True):
                     classes = elem.get('class', [])
                     class_str = ' '.join(classes) if isinstance(classes, list) else str(classes)
                     if 'description__text' in class_str:
                         text = elem.get_text(separator='\n', strip=True)
                         if len(text) > 100:
-                            logger.debug(f"  LinkedIn: 命中 description__text, 长度={len(text)}")
+                            logger.debug(f"  LinkedIn: 命中 description__text")
                             return text
                 
-                # 策略 2: 找包含 section > div 结构的 description 容器
+                # 策略 3: 找包含 section > div 结构的 description 容器
                 for elem in soup.find_all(True):
                     classes = elem.get('class', [])
                     class_str = ' '.join(classes) if isinstance(classes, list) else str(classes)
@@ -408,16 +461,6 @@ class JobScraper:
                                 logger.debug(f"  LinkedIn: 命中 description > section > div")
                                 return div.get_text(separator='\n', strip=True)
                 
-                # 策略 3: 找 "About the job" 标题，取它后面的内容
-                for heading in soup.find_all(['h2', 'h3', 'h4', 'span', 'div']):
-                    heading_text = heading.get_text(strip=True).lower()
-                    if 'about the job' in heading_text or 'job description' in heading_text:
-                        for sibling in heading.find_next_siblings():
-                            text = sibling.get_text(separator='\n', strip=True)
-                            if len(text) > 100:
-                                logger.debug(f"  LinkedIn: 命中 'About the job' 后续内容")
-                                return text
-                
                 # 策略 4: 兜底——找所有 div，取文本在 200-10000 字范围内最长的
                 candidates = []
                 for div in soup.find_all('div'):
@@ -426,7 +469,7 @@ class JobScraper:
                         candidates.append((len(text), text))
                 if candidates:
                     candidates.sort(reverse=True)
-                    logger.debug(f"  LinkedIn: 兜底策略命中，最大块 {candidates[0][0]} 字符")
+                    logger.debug(f"  LinkedIn: 兜底策略命中")
                     return candidates[0][1]
                 
                 logger.warning(f"  LinkedIn: 所有策略都没命中 (job_id={job_id}), 页面长度={len(response.text)}")
@@ -858,6 +901,24 @@ class EmailSender:
             <strong>💡 建议：</strong> {analysis.get('recommendation', '建议申请')}
         </div>
         
+        <div style="margin: 12px 0; padding: 10px; background: #fff; border-radius: 6px; border-left: 3px solid #667eea; font-size: 14px; color: #555;">
+"""
+            desc = job.get('description', '').strip()
+            if desc:
+                # 有 description：显示预览（前 150 字）
+                preview = desc[:150].replace('\n', ' ').strip()
+                if len(desc) > 150:
+                    preview += '...'
+                html += f'            <strong>📋 岗位描述：</strong> {preview}\n'
+            elif job['source'] == 'Indeed':
+                # Indeed 无 description：引导用户点击链接查看
+                html += '            <strong>📋 岗位描述：</strong> 点击下方"立即申请"按钮查看完整职位描述\n'
+            else:
+                # LinkedIn 无 description
+                html += '            <strong>📋 岗位描述：</strong> 请访问 LinkedIn 原帖查看详情\n'
+            
+            html += f"""        </div>
+        
         <a href="{job['url']}" class="apply-button" target="_blank">立即申请 →</a>
     </div>
 """
@@ -916,16 +977,22 @@ def main():
             logger.warning("未找到任何岗位，脚本结束")
             return
         
-        # 获取 Indeed 岗位的完整职位描述（LinkedIn 已经在 scrape_linkedin 内部处理好了）
-        # 只处理去重后仍在列表里的 Indeed 岗位，最多 15 条
-        indeed_to_fetch = [j for j in all_jobs if j['source'] == 'Indeed' and not j.get('description')][:15]
-        logger.info(f"获取 Indeed 岗位详细描述（{len(indeed_to_fetch)} 条）...")
-        for job in indeed_to_fetch:
-            if job.get('url'):
+        # Indeed 详情页拉取（用正确的 /viewjob?jk= URL 格式）
+        # 只拉取列表页 description 不足 200 字的那些（大部分列表页已经有足够内容）
+        indeed_to_fetch = [j for j in all_jobs 
+                          if j['source'] == 'Indeed' 
+                          and j.get('url')
+                          and len(j.get('description', '')) < 200][:15]
+        
+        if indeed_to_fetch:
+            logger.info(f"尝试获取 Indeed 详情页补充内容（{len(indeed_to_fetch)} 条 description < 200 字）...")
+            for job in indeed_to_fetch:
                 full_desc = scraper.get_indeed_description(job['url'])
-                if full_desc:
+                if full_desc and len(full_desc) > len(job.get('description', '')):
                     job['description'] = full_desc
                 time.sleep(1)
+        else:
+            logger.info("所有 Indeed 岗位列表页内容充足，跳过详情页拉取")
         
         # 保存原始数据
         with open(f'jobs_{datetime.now().strftime("%Y%m%d")}.json', 'w', encoding='utf-8') as f:
@@ -955,4 +1022,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
