@@ -51,16 +51,15 @@ class JobSearchConfig:
             'software development engineer',
             'software engineer',
             'backend engineer',
-            'full stack engineer',
-            'java developer'
+            'full stack engineer'
         ]
         self.location = 'Greater Vancouver, BC'
         self.distance_km = 50
         
         # 温哥华的经纬度（用于精确搜索）
         self.vancouver_coords = {
-            'latitude': float(os.getenv('LATITUDE')),
-            'longitude': float(os.getenv('LONGITUDE'))
+            'latitude': 49.2827,
+            'longitude': -123.1207
         }
         
         self.validate()
@@ -99,37 +98,48 @@ class JobScraper:
         jobs = []
         logger.info("开始抓取 Indeed 岗位...")
         
-        try:
-            for keyword in self.config.search_keywords:
-                # Indeed 搜索 URL
-                base_url = 'https://ca.indeed.com/jobs'
-                params = {
-                    'q': keyword,
-                    'l': 'Vancouver, BC',
-                    'radius': self.config.distance_km,
-                    'fromage': '1',  # 过去1天
-                    'sort': 'date'
-                }
-                
-                # 如果有 ScraperAPI key，使用它来避免被封
+        for keyword in self.config.search_keywords:
+            # 先拼好 Indeed 自己的目标 URL + 参数
+            indeed_params = {
+                'q': keyword,
+                'l': 'Vancouver, BC',
+                'radius': self.config.distance_km,
+                'fromage': '1',  # 过去1天
+                'sort': 'date'
+            }
+            target_url = 'https://ca.indeed.com/jobs?' + self._build_query_string(indeed_params)
+            
+            try:
                 if self.config.scraperapi_key:
-                    api_url = 'http://api.scraperapi.com'
-                    params['api_key'] = self.config.scraperapi_key
-                    params['url'] = f"{base_url}?{self._build_query_string(params)}"
-                    response = self.session.get(api_url, params={'api_key': self.config.scraperapi_key, 'url': base_url}, timeout=30)
+                    # ScraperAPI 用法：把目标 URL 作为参数传给 ScraperAPI
+                    # ScraperAPI 帮你发实际请求，返回结果
+                    response = self.session.get(
+                        'https://api.scraperapi.com',
+                        params={
+                            'api_key': self.config.scraperapi_key,
+                            'url': target_url
+                        },
+                        timeout=60  # ScraperAPI 需要更长时间处理
+                    )
                 else:
-                    response = self.session.get(base_url, params=params, timeout=30)
+                    # 没有 ScraperAPI，直接请求 Indeed（成功率较低）
+                    response = self.session.get(target_url, timeout=30)
                 
                 if response.status_code == 200:
-                    jobs.extend(self._parse_indeed_results(response.text))
-                    time.sleep(2)  # 礼貌等待
+                    parsed = self._parse_indeed_results(response.text)
+                    jobs.extend(parsed)
+                    logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
                 else:
-                    logger.warning(f"Indeed 请求失败: {response.status_code}")
-                    
-        except Exception as e:
-            logger.error(f"Indeed 抓取错误: {str(e)}")
+                    logger.warning(f"  Indeed 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
+                
+                time.sleep(2)  # 礼貌等待
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"  Indeed 请求超时 (关键词: {keyword})，跳过继续下一个关键词")
+            except Exception as e:
+                logger.warning(f"  Indeed 抓取错误 (关键词: {keyword}): {str(e)}")
         
-        logger.info(f"从 Indeed 获取了 {len(jobs)} 个岗位")
+        logger.info(f"从 Indeed 总共获取了 {len(jobs)} 个岗位")
         return jobs
     
     def _parse_indeed_results(self, html: str) -> List[Dict[str, Any]]:
@@ -181,37 +191,50 @@ class JobScraper:
     def scrape_linkedin(self) -> List[Dict[str, Any]]:
         """
         抓取 LinkedIn 上的工作岗位
-        LinkedIn 反爬虫较严格，建议使用官方 API 或第三方服务
-        这里提供基础实现
         """
         jobs = []
         logger.info("开始抓取 LinkedIn 岗位...")
         
-        try:
-            for keyword in self.config.search_keywords:
-                # LinkedIn 公开搜索 URL
-                base_url = 'https://www.linkedin.com/jobs/search'
-                params = {
-                    'keywords': keyword,
-                    'location': 'Vancouver, British Columbia, Canada',
-                    'distance': 50,
-                    'f_TPR': 'r86400',  # 过去24小时
-                    'position': 1,
-                    'pageNum': 0
-                }
-                
-                response = self.session.get(base_url, params=params, timeout=30)
+        for keyword in self.config.search_keywords:
+            # 拼好 LinkedIn 目标 URL
+            linkedin_params = {
+                'keywords': keyword,
+                'location': 'Vancouver, British Columbia, Canada',
+                'distance': 50,
+                'f_TPR': 'r86400',  # 过去24小时
+                'position': 1,
+                'pageNum': 0
+            }
+            target_url = 'https://www.linkedin.com/jobs/search?' + self._build_query_string(linkedin_params)
+            
+            try:
+                if self.config.scraperapi_key:
+                    response = self.session.get(
+                        'https://api.scraperapi.com',
+                        params={
+                            'api_key': self.config.scraperapi_key,
+                            'url': target_url
+                        },
+                        timeout=60
+                    )
+                else:
+                    response = self.session.get(target_url, timeout=30)
                 
                 if response.status_code == 200:
-                    jobs.extend(self._parse_linkedin_results(response.text))
-                    time.sleep(3)  # LinkedIn 需要更长等待
+                    parsed = self._parse_linkedin_results(response.text)
+                    jobs.extend(parsed)
+                    logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
                 else:
-                    logger.warning(f"LinkedIn 请求失败: {response.status_code}")
-                    
-        except Exception as e:
-            logger.error(f"LinkedIn 抓取错误: {str(e)}")
+                    logger.warning(f"  LinkedIn 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
+                
+                time.sleep(3)  # LinkedIn 需要更长等待
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"  LinkedIn 请求超时 (关键词: {keyword})，跳过继续下一个关键词")
+            except Exception as e:
+                logger.warning(f"  LinkedIn 抓取错误 (关键词: {keyword}): {str(e)}")
         
-        logger.info(f"从 LinkedIn 获取了 {len(jobs)} 个岗位")
+        logger.info(f"从 LinkedIn 总共获取了 {len(jobs)} 个岗位")
         return jobs
     
     def _parse_linkedin_results(self, html: str) -> List[Dict[str, Any]]:
