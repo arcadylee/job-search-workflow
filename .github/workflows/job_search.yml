@@ -16,8 +16,8 @@ jobs:
   job-search:
     runs-on: ubuntu-latest
     
-    # 设置超时时间为 20 分钟
-    timeout-minutes: 20
+    # 设置超时时间为 45 分钟（Indeed 重试 + 逐条拿详情需要较长时间）
+    timeout-minutes: 45
     
     # 设置权限
     permissions:
