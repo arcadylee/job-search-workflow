@@ -429,22 +429,19 @@ class JobScraper:
                     logger.debug(f"  LinkedIn: 兜底策略命中，最大块 {candidates[0][0]} 字符")
                     return candidates[0][1]
                 
-                logger.debug(f"  LinkedIn: 所有策略都没命中 (job_id={job_id}), 页面长度={len(response.text)}")
+                logger.warning(f"  LinkedIn: 所有策略都没命中 (job_id={job_id}), 页面长度={len(response.text)}")
             else:
-                logger.debug(f"  LinkedIn jobPosting: HTTP {response.status_code} (job_id={job_id})")
+                logger.warning(f"  LinkedIn jobPosting: HTTP {response.status_code} (job_id={job_id})")
                 
         except Exception as e:
-            logger.debug(f"  获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
+            logger.warning(f"  获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
         return ''
     
     def get_indeed_description(self, job_url: str) -> str:
         """获取 Indeed 单个岗位的完整职位描述
         
-        多层备选 selector，因为 Indeed 页面结构会随版本变化：
-        - id='jobDescriptionText'          (旧版)
-        - class 含 'jobDescriptionText'    (部分版本)
-        - <div> 里包含 'Full job description' 附近的内容
-        - class 含 'css-' 前缀的大块文本区域（兜底）
+        多层备选 selector，因为 Indeed 页面结构会随版本变化。
+        ScraperAPI 需要 render=true 才能拿到 Indeed 动态渲染的内容。
         """
         try:
             if self.config.scraperapi_key:
@@ -452,63 +449,73 @@ class JobScraper:
                     'https://api.scraperapi.com',
                     params={
                         'api_key': self.config.scraperapi_key,
-                        'url': job_url
+                        'url': job_url,
+                        'render': 'true'  # 关键：Indeed 用 JS 动态渲染，不加这个拿不到内容
                     },
                     timeout=60
                 )
             else:
                 response = self.session.get(job_url, timeout=30)
             
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'lxml')
+            if response.status_code != 200:
+                logger.warning(f"  Indeed 详情页 HTTP {response.status_code}: {job_url}")
+                return ''
+            
+            page_len = len(response.text)
+            logger.info(f"  Indeed 详情页响应长度: {page_len} 字符 | {job_url.split('/')[-1]}")
+            
+            # 页面太短说明不是正常岗位页（可能是 captcha / 错误页 / 空页）
+            if page_len < 500:
+                logger.warning(f"  Indeed 页面太短 ({page_len} 字符)，可能是错误页: {job_url}")
+                return ''
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # 策略 1: id='jobDescriptionText'（经典结构）
+            desc_elem = soup.find('div', id='jobDescriptionText')
+            if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
+                logger.info("  Indeed: 命中 id=jobDescriptionText")
+                return desc_elem.get_text(separator='\n', strip=True)
+            
+            # 策略 2: class 里包含 'jobDescriptionText'
+            desc_elem = soup.find(attrs={'class': lambda c: c and 'jobDescriptionText' in str(c)})
+            if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
+                logger.info("  Indeed: 命中 class=jobDescriptionText")
+                return desc_elem.get_text(separator='\n', strip=True)
+            
+            # 策略 3: 找 "Full job description" 标题，取其后面的内容
+            for heading in soup.find_all(['h2', 'h3', 'h4', 'span', 'div']):
+                if 'full job description' in heading.get_text(strip=True).lower():
+                    for sibling in heading.find_next_siblings():
+                        text = sibling.get_text(separator='\n', strip=True)
+                        if len(text) > 100:
+                            logger.info("  Indeed: 命中 'Full job description' 后续内容")
+                            return text
+                    parent = heading.parent
+                    if parent:
+                        text = parent.get_text(separator='\n', strip=True)
+                        if len(text) > 100:
+                            return text
+            
+            # 策略 4: 兜底——取文本在 200-15000 字范围内最长的 div
+            candidates = []
+            for div in soup.find_all('div'):
+                text = div.get_text(separator='\n', strip=True)
+                if 200 < len(text) < 15000:
+                    candidates.append((len(text), text))
+            if candidates:
+                candidates.sort(reverse=True)
+                logger.info(f"  Indeed: 兜底策略命中，最大块 {candidates[0][0]} 字符")
+                return candidates[0][1]
+            
+            # 都没命中：记录页面里实际有什么，方便诊断
+            all_text = soup.get_text(strip=True)
+            logger.warning(f"  Indeed: 所有策略都没命中 | 页面总文本={len(all_text)} 字符 | 预览: {all_text[:200]}")
                 
-                # 策略 1: id='jobDescriptionText'（旧版，但仍然最准确）
-                desc_elem = soup.find('div', id='jobDescriptionText')
-                if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
-                    logger.debug("  Indeed: 命中 id=jobDescriptionText")
-                    return desc_elem.get_text(separator='\n', strip=True)
-                
-                # 策略 2: class 里包含 'jobDescriptionText'
-                desc_elem = soup.find(attrs={'class': lambda c: c and 'jobDescriptionText' in str(c)})
-                if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
-                    logger.debug("  Indeed: 命中 class=jobDescriptionText")
-                    return desc_elem.get_text(separator='\n', strip=True)
-                
-                # 策略 3: 找 "Full job description" 这个标题，取它后面的兄弟元素内容
-                for heading in soup.find_all(['h2', 'h3', 'h4', 'span', 'div']):
-                    if 'full job description' in heading.get_text(strip=True).lower():
-                        # 往后找第一个有实质内容的兄弟
-                        for sibling in heading.find_next_siblings():
-                            text = sibling.get_text(separator='\n', strip=True)
-                            if len(text) > 100:
-                                logger.debug("  Indeed: 命中 'Full job description' 后续内容")
-                                return text
-                        # 如果没有兄弟，看父容器里除了标题之外的内容
-                        parent = heading.parent
-                        if parent:
-                            text = parent.get_text(separator='\n', strip=True)
-                            if len(text) > 100:
-                                return text
-                
-                # 策略 4: 兜底——找所有 div，取文本最长且 > 200 字的那个
-                # （通常 JD 是页面上文本量最大的单个块）
-                candidates = []
-                for div in soup.find_all('div'):
-                    text = div.get_text(separator='\n', strip=True)
-                    # 排除整个页面的根容器（文本量太大的），只看 200-10000 范围
-                    if 200 < len(text) < 10000:
-                        candidates.append((len(text), text))
-                if candidates:
-                    candidates.sort(reverse=True)
-                    logger.debug(f"  Indeed: 兜底策略命中，最大块 {candidates[0][0]} 字符")
-                    return candidates[0][1]
-                
-                logger.debug(f"  Indeed: 所有策略都没命中，页面长度={len(response.text)}")
-            else:
-                logger.debug(f"  Indeed: HTTP {response.status_code} for {job_url}")
-                
+        except requests.exceptions.Timeout:
+            logger.warning(f"  Indeed 详情页超时: {job_url}")
         except Exception as e:
-            logger.debug(f"  获取 Indeed 岗位详情失败 ({job_url}): {str(e)}")
+            logger.warning(f"  Indeed 详情页异常: {str(e)} | {job_url}")
         return ''
     
     def _build_query_string(self, params: Dict) -> str:
@@ -948,3 +955,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
