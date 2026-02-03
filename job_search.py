@@ -52,7 +52,7 @@ class JobSearchConfig:
             'software engineer',
             'backend engineer',
             'full stack engineer',
-            ‘Java developer'
+            'Java developer'
         ]
         self.location = 'Greater Vancouver, BC'
         self.distance_km = 50
