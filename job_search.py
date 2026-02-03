@@ -51,15 +51,16 @@ class JobSearchConfig:
             'software development engineer',
             'software engineer',
             'backend engineer',
-            'full stack engineer'
+            'full stack engineer'，
+            ‘Java developer'
         ]
         self.location = 'Greater Vancouver, BC'
         self.distance_km = 50
         
         # 温哥华的经纬度（用于精确搜索）
         self.vancouver_coords = {
-            'latitude': 49.2827,
-            'longitude': -123.1207
+            'latitude': float(os.getenv('LATITUDE')),
+            'longitude': float(os.getenv('LONGITUDE'))
         }
         
         self.validate()
