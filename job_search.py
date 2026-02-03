@@ -110,35 +110,44 @@ class JobScraper:
             }
             target_url = 'https://ca.indeed.com/jobs?' + self._build_query_string(indeed_params)
             
-            try:
-                if self.config.scraperapi_key:
-                    # ScraperAPI 用法：把目标 URL 作为参数传给 ScraperAPI
-                    # ScraperAPI 帮你发实际请求，返回结果
-                    response = self.session.get(
-                        'https://api.scraperapi.com',
-                        params={
-                            'api_key': self.config.scraperapi_key,
-                            'url': target_url
-                        },
-                        timeout=60  # ScraperAPI 需要更长时间处理
-                    )
-                else:
-                    # 没有 ScraperAPI，直接请求 Indeed（成功率较低）
-                    response = self.session.get(target_url, timeout=30)
-                
-                if response.status_code == 200:
-                    parsed = self._parse_indeed_results(response.text)
-                    jobs.extend(parsed)
-                    logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
-                else:
-                    logger.warning(f"  Indeed 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
-                
-                time.sleep(2)  # 礼貌等待
-                
-            except requests.exceptions.Timeout:
-                logger.warning(f"  Indeed 请求超时 (关键词: {keyword})，跳过继续下一个关键词")
-            except Exception as e:
-                logger.warning(f"  Indeed 抓取错误 (关键词: {keyword}): {str(e)}")
+            # 最多重试 3 次，ScraperAPI 偶尔会返回 500
+            for attempt in range(3):
+                try:
+                    if self.config.scraperapi_key:
+                        response = self.session.get(
+                            'https://api.scraperapi.com',
+                            params={
+                                'api_key': self.config.scraperapi_key,
+                                'url': target_url
+                            },
+                            timeout=60
+                        )
+                    else:
+                        response = self.session.get(target_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        parsed = self._parse_indeed_results(response.text)
+                        jobs.extend(parsed)
+                        logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
+                        break  # 成功，不用再重试
+                    elif response.status_code == 500 and attempt < 2:
+                        logger.warning(f"  Indeed 500错误 (关键词: {keyword})，第 {attempt+1} 次重试...")
+                        time.sleep(3 * (attempt + 1))  # 重试间隔逐次增加
+                    else:
+                        logger.warning(f"  Indeed 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
+                        break
+                    
+                except requests.exceptions.Timeout:
+                    if attempt < 2:
+                        logger.warning(f"  Indeed 超时 (关键词: {keyword})，第 {attempt+1} 次重试...")
+                        time.sleep(3)
+                    else:
+                        logger.warning(f"  Indeed 持续超时 (关键词: {keyword})，放弃")
+                except Exception as e:
+                    logger.warning(f"  Indeed 抓取错误 (关键词: {keyword}): {str(e)}")
+                    break
+            
+            time.sleep(2)  # 礼貌等待
         
         logger.info(f"从 Indeed 总共获取了 {len(jobs)} 个岗位")
         return jobs
@@ -191,109 +200,180 @@ class JobScraper:
     
     def scrape_linkedin(self) -> List[Dict[str, Any]]:
         """
-        抓取 LinkedIn 上的工作岗位
+        使用 LinkedIn jobs-guest 公开 API 抓取岗位
+        不需要登录，也不需要 API key
         """
         jobs = []
         logger.info("开始抓取 LinkedIn 岗位...")
         
+        # 先用 typeahead 接口拿 Vancouver 的 geoId
+        geo_id = self._get_linkedin_geo_id('Vancouver')
+        if not geo_id:
+            logger.warning("  无法获取 Vancouver 的 geoId，将使用 location 参数代替")
+        
         for keyword in self.config.search_keywords:
-            # 拼好 LinkedIn 目标 URL
-            linkedin_params = {
-                'keywords': keyword,
-                'location': 'Vancouver, British Columbia, Canada',
-                'distance': 50,
-                'f_TPR': 'r86400',  # 过去24小时
-                'position': 1,
-                'pageNum': 0
-            }
-            target_url = 'https://www.linkedin.com/jobs/search?' + self._build_query_string(linkedin_params)
-            
             try:
-                if self.config.scraperapi_key:
-                    response = self.session.get(
-                        'https://api.scraperapi.com',
-                        params={
-                            'api_key': self.config.scraperapi_key,
-                            'url': target_url
-                        },
-                        timeout=60
-                    )
-                else:
-                    response = self.session.get(target_url, timeout=30)
+                # Step 1: 用 search 接口拿岗位列表（返回 HTML 片段）
+                search_url = 'https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search'
+                params = {
+                    'keywords': keyword,
+                    'location': 'Vancouver, British Columbia, Canada',
+                    'f_TPR': 'r86400',  # 过去24小时
+                    'start': 0,         # 分页起始位置
+                }
+                if geo_id:
+                    params['geoId'] = geo_id
+                
+                response = self.session.get(search_url, params=params, timeout=30)
                 
                 if response.status_code == 200:
                     parsed = self._parse_linkedin_results(response.text)
                     jobs.extend(parsed)
                     logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
                 else:
-                    logger.warning(f"  LinkedIn 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
+                    logger.warning(f"  LinkedIn search 失败 (关键词: {keyword}): HTTP {response.status_code}")
                 
-                time.sleep(3)  # LinkedIn 需要更长等待
+                time.sleep(2)
                 
             except requests.exceptions.Timeout:
-                logger.warning(f"  LinkedIn 请求超时 (关键词: {keyword})，跳过继续下一个关键词")
+                logger.warning(f"  LinkedIn 超时 (关键词: {keyword})")
             except Exception as e:
                 logger.warning(f"  LinkedIn 抓取错误 (关键词: {keyword}): {str(e)}")
+        
+        # Step 2: 对收集到的岗位，逐条拿 description（最多拿前 30 条）
+        logger.info(f"  开始获取 LinkedIn 岗位详情（共 {len(jobs)} 条，最多处理 30 条）...")
+        for job in jobs[:30]:
+            job_id = self._extract_linkedin_job_id(job.get('url', ''))
+            if job_id:
+                desc = self._get_linkedin_job_description(job_id)
+                if desc:
+                    job['description'] = desc
+                time.sleep(1)  # 每条间隔 1 秒，别太快
         
         logger.info(f"从 LinkedIn 总共获取了 {len(jobs)} 个岗位")
         return jobs
     
+    def _get_linkedin_geo_id(self, city: str) -> str:
+        """用 LinkedIn typeahead 接口查询城市的 geoId"""
+        try:
+            url = 'https://www.linkedin.com/jobs-guest/api/typeaheadHits'
+            params = {
+                'origin': 'jserp',
+                'typeaheadType': 'GEO',
+                'geoTypes': 'POPULATED_PLACE',
+                'query': city
+            }
+            response = self.session.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                # 返回的是列表，找第一个匹配的
+                hits = data.get('typeaheadHits', [])
+                for hit in hits:
+                    if 'Vancouver' in hit.get('text', ''):
+                        logger.info(f"  获取到 Vancouver geoId: {hit['id']}")
+                        return str(hit['id'])
+        except Exception as e:
+            logger.debug(f"  获取 geoId 失败: {str(e)}")
+        return ''
+    
     def _parse_linkedin_results(self, html: str) -> List[Dict[str, Any]]:
-        """解析 LinkedIn HTML 结果"""
+        """解析 LinkedIn jobs-guest search 返回的 HTML"""
         jobs = []
         soup = BeautifulSoup(html, 'lxml')
         
-        # LinkedIn 使用不同的类名
-        job_cards = soup.find_all('div', class_='base-card')
+        # jobs-guest 返回的每个岗位卡片
+        job_cards = soup.find_all('li')
         
         for card in job_cards:
             try:
-                title_elem = card.find('h3', class_='base-search-card__title')
-                company_elem = card.find('h4', class_='base-search-card__subtitle')
-                location_elem = card.find('span', class_='job-search-card__location')
-                link_elem = card.find('a', class_='base-card__full-link')
+                # 用 attribute selector 匹配，比 class 名更稳定
+                title_elem = card.find(attrs={'class': lambda c: c and 'title' in c.lower()}) if card else None
+                company_elem = card.find(attrs={'class': lambda c: c and 'subtitle' in c.lower()}) if card else None
+                location_elem = card.find(attrs={'class': lambda c: c and 'location' in c.lower()}) if card else None
+                link_elem = card.find('a', attrs={'class': lambda c: c and 'full-link' in c.lower()}) if card else None
                 
-                if not title_elem:
+                # 如果上面的 lambda 都没匹配到，尝试直接找 a 标签
+                if not link_elem:
+                    link_elem = card.find('a', href=lambda h: h and '/jobs/view/' in h)
+                
+                if not title_elem and not link_elem:
                     continue
+                
+                title = title_elem.get_text(strip=True) if title_elem else 'Unknown Title'
+                url = ''
+                if link_elem and link_elem.get('href'):
+                    href = link_elem['href']
+                    url = href if href.startswith('http') else f"https://www.linkedin.com{href}"
                 
                 jobs.append({
                     'source': 'LinkedIn',
-                    'title': title_elem.get_text(strip=True),
+                    'title': title,
                     'company': company_elem.get_text(strip=True) if company_elem else 'Unknown',
                     'location': location_elem.get_text(strip=True) if location_elem else 'Unknown',
-                    'url': link_elem['href'] if link_elem and 'href' in link_elem.attrs else '',
-                    'description': '',  # LinkedIn 需要单独请求详情页
+                    'url': url,
+                    'description': '',  # 后续单独请求
                     'posted_date': datetime.now().isoformat()
                 })
                 
             except Exception as e:
-                logger.debug(f"解析 LinkedIn 岗位卡片失败: {str(e)}")
+                logger.debug(f"  解析 LinkedIn 卡片失败: {str(e)}")
                 continue
         
         return jobs
     
-    def get_job_description(self, job_url: str) -> str:
-        """获取完整的职位描述"""
+    def _extract_linkedin_job_id(self, url: str) -> str:
+        """从 LinkedIn 岗位 URL 中提取 job_id
+        例如: https://www.linkedin.com/jobs/view/xxx-yyy-zzz-12345?... → 12345
+        """
+        if not url:
+            return ''
+        # 先去掉 query string
+        clean_url = url.split('?')[0]
+        # 取最后一段，按 '-' 分割后取末尾的数字
+        parts = clean_url.rstrip('/').split('-')
+        if parts:
+            return parts[-1]
+        return ''
+    
+    def _get_linkedin_job_description(self, job_id: str) -> str:
+        """用 jobs-guest jobPosting 接口拿单个岗位的 description"""
         try:
-            response = self.session.get(job_url, timeout=30)
+            url = f'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}'
+            response = self.session.get(url, timeout=15)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'lxml')
-                
-                # Indeed 的职位描述
-                if 'indeed.com' in job_url:
-                    desc_elem = soup.find('div', id='jobDescriptionText')
-                    if desc_elem:
-                        return desc_elem.get_text(separator='\n', strip=True)
-                
-                # LinkedIn 的职位描述
-                elif 'linkedin.com' in job_url:
-                    desc_elem = soup.find('div', class_='show-more-less-html__markup')
-                    if desc_elem:
-                        return desc_elem.get_text(separator='\n', strip=True)
-            
+                # 按文档，description 在 [class*=description] > section > div
+                desc_section = soup.find(attrs={'class': lambda c: c and 'description' in c.lower()})
+                if desc_section:
+                    div = desc_section.find('div')
+                    if div:
+                        return div.get_text(separator='\n', strip=True)
         except Exception as e:
-            logger.debug(f"获取职位描述失败 {job_url}: {str(e)}")
-        
+            logger.debug(f"  获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
+        return ''
+    
+    def get_indeed_description(self, job_url: str) -> str:
+        """获取 Indeed 单个岗位的完整职位描述"""
+        try:
+            if self.config.scraperapi_key:
+                response = self.session.get(
+                    'https://api.scraperapi.com',
+                    params={
+                        'api_key': self.config.scraperapi_key,
+                        'url': job_url
+                    },
+                    timeout=60
+                )
+            else:
+                response = self.session.get(job_url, timeout=30)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'lxml')
+                desc_elem = soup.find('div', id='jobDescriptionText')
+                if desc_elem:
+                    return desc_elem.get_text(separator='\n', strip=True)
+        except Exception as e:
+            logger.debug(f"  获取 Indeed 岗位详情失败 ({job_url}): {str(e)}")
         return ''
     
     def _build_query_string(self, params: Dict) -> str:
@@ -636,11 +716,11 @@ def main():
             logger.warning("未找到任何岗位，脚本结束")
             return
         
-        # 获取完整的职位描述（前20个）
-        logger.info("获取详细职位描述...")
-        for job in all_jobs[:20]:
-            if job['url']:
-                full_desc = scraper.get_job_description(job['url'])
+        # 获取 Indeed 岗位的完整职位描述（LinkedIn 已经在 scrape_linkedin 内部处理好了）
+        logger.info("获取 Indeed 岗位详细描述...")
+        for job in indeed_jobs[:20]:
+            if job.get('url'):
+                full_desc = scraper.get_indeed_description(job['url'])
                 if full_desc:
                     job['description'] = full_desc
                 time.sleep(1)
