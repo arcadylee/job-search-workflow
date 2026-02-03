@@ -61,6 +61,8 @@ jobs:
         EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
         SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
         RESUME_CONTENT: ${{ secrets.RESUME_CONTENT }}
+        LATITUDE: ${{ secrets.LATITUDE }}
+        LONGITUDE: ${{ secrets.LONGITUDE }}
       run: |
         python job_search.py
     
