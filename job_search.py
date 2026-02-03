@@ -240,15 +240,29 @@ class JobScraper:
             except Exception as e:
                 logger.warning(f"  LinkedIn 抓取错误 (关键词: {keyword}): {str(e)}")
         
-        # Step 2: 对收集到的岗位，逐条拿 description（最多拿前 30 条）
-        logger.info(f"  开始获取 LinkedIn 岗位详情（共 {len(jobs)} 条，最多处理 30 条）...")
-        for job in jobs[:30]:
+        # Step 2: 先按 URL 去重（同一岗位可能被不同关键词搜到多次）
+        seen_urls = set()
+        unique_jobs = []
+        for job in jobs:
+            url = job.get('url', '')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                unique_jobs.append(job)
+            elif not url:
+                unique_jobs.append(job)  # 没 URL 的先保留
+        
+        logger.info(f"  去重前 {len(jobs)} 条 → 去重后 {len(unique_jobs)} 条")
+        jobs = unique_jobs
+        
+        # Step 3: 对去重后的岗位逐条拿 description（最多 20 条）
+        logger.info(f"  开始获取 LinkedIn 岗位详情（处理 {min(len(jobs), 20)} 条）...")
+        for job in jobs[:20]:
             job_id = self._extract_linkedin_job_id(job.get('url', ''))
             if job_id:
                 desc = self._get_linkedin_job_description(job_id)
                 if desc:
                     job['description'] = desc
-                time.sleep(1)  # 每条间隔 1 秒，别太快
+                time.sleep(1)
         
         logger.info(f"从 LinkedIn 总共获取了 {len(jobs)} 个岗位")
         return jobs
@@ -710,15 +724,30 @@ def main():
         linkedin_jobs = scraper.scrape_linkedin()
         
         all_jobs = indeed_jobs + linkedin_jobs
-        logger.info(f"总共抓取到 {len(all_jobs)} 个岗位")
+        logger.info(f"合并前总共 {len(all_jobs)} 个岗位")
+        
+        # 跨源去重：Indeed 和 LinkedIn 可能有相同岗位
+        # 按 title(小写前30字) + company(小写) 作为去重 key
+        seen_keys = set()
+        deduped_jobs = []
+        for job in all_jobs:
+            key = (job['title'].lower()[:30], job['company'].lower())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped_jobs.append(job)
+        
+        all_jobs = deduped_jobs
+        logger.info(f"去重后剩余 {len(all_jobs)} 个岗位")
         
         if not all_jobs:
             logger.warning("未找到任何岗位，脚本结束")
             return
         
         # 获取 Indeed 岗位的完整职位描述（LinkedIn 已经在 scrape_linkedin 内部处理好了）
-        logger.info("获取 Indeed 岗位详细描述...")
-        for job in indeed_jobs[:20]:
+        # 只处理去重后仍在列表里的 Indeed 岗位，最多 15 条
+        indeed_to_fetch = [j for j in all_jobs if j['source'] == 'Indeed' and not j.get('description')][:15]
+        logger.info(f"获取 Indeed 岗位详细描述（{len(indeed_to_fetch)} 条）...")
+        for job in indeed_to_fetch:
             if job.get('url'):
                 full_desc = scraper.get_indeed_description(job['url'])
                 if full_desc:
