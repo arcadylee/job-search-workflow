@@ -51,7 +51,7 @@ class JobSearchConfig:
             'software development engineer',
             'software engineer',
             'backend engineer',
-            'full stack engineer'，
+            'full stack engineer',
             ‘Java developer'
         ]
         self.location = 'Greater Vancouver, BC'
