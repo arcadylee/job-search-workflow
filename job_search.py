@@ -78,7 +78,6 @@ class JobSearchConfig:
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
-
 class JobScraper:
     """工作岗位抓取器"""
     
@@ -157,12 +156,10 @@ class JobScraper:
         jobs = []
         soup = BeautifulSoup(html, 'lxml')
         
-        # Indeed 使用 mosaic-provider-jobcards 类
         job_cards = soup.find_all('div', class_='job_seen_beacon')
         
         for card in job_cards:
             try:
-                # 提取基本信息
                 title_elem = card.find('h2', class_='jobTitle')
                 company_elem = card.find('span', {'data-testid': 'company-name'})
                 location_elem = card.find('div', {'data-testid': 'text-location'})
@@ -174,11 +171,11 @@ class JobScraper:
                 company = company_elem.get_text(strip=True) if company_elem else 'Unknown'
                 location = location_elem.get_text(strip=True) if location_elem else 'Unknown'
                 
-                # 获取职位链接
+                # 获取职位链接并转换为真正的详情页 URL
                 link_elem = title_elem.find('a')
-                job_link = f"https://ca.indeed.com{link_elem['href']}" if link_elem and 'href' in link_elem.attrs else ''
+                raw_href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else ''
+                job_link = self._extract_indeed_detail_url(raw_href)
                 
-                # 提取 job description 片段
                 snippet_elem = card.find('div', class_='job-snippet')
                 snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
                 
@@ -197,6 +194,38 @@ class JobScraper:
                 continue
         
         return jobs
+    
+    def _extract_indeed_detail_url(self, href: str) -> str:
+        """从 Indeed 的 href 中提取真正的岗位详情页 URL
+        
+        Indeed 返回的 href 有两种：
+        - /rc/clk?jk=XXXXX&...   → 普通跳转链接
+        - /pagead/clk?...&mo=r   → 广告跳转链接（没有 jk，无法提取）
+        
+        需要从里面提取 jk 参数，拼成：https://ca.indeed.com/jobs/details/{jk}
+        """
+        from urllib.parse import urlparse, parse_qs
+        
+        if not href:
+            return ''
+        
+        full_url = f"https://ca.indeed.com{href}" if href.startswith('/') else href
+        
+        try:
+            parsed = urlparse(full_url)
+            qs = parse_qs(parsed.query)
+            
+            # 从 query string 里拿 jk 参数
+            jk = qs.get('jk', [None])[0]
+            if jk:
+                return f'https://ca.indeed.com/jobs/details/{jk}'
+            
+            # /pagead/clk 没有 jk，拿不到详情页，返回空
+            logger.debug(f"  无法从 Indeed URL 提取 jk: {href[:80]}")
+            return ''
+            
+        except Exception:
+            return ''
     
     def scrape_linkedin(self) -> List[Dict[str, Any]]:
         """
@@ -350,24 +379,73 @@ class JobScraper:
         return ''
     
     def _get_linkedin_job_description(self, job_id: str) -> str:
-        """用 jobs-guest jobPosting 接口拿单个岗位的 description"""
+        """用 jobs-guest jobPosting 接口拿单个岗位的 description（About the job）"""
         try:
             url = f'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}'
             response = self.session.get(url, timeout=15)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'lxml')
-                # 按文档，description 在 [class*=description] > section > div
-                desc_section = soup.find(attrs={'class': lambda c: c and 'description' in c.lower()})
-                if desc_section:
-                    div = desc_section.find('div')
-                    if div:
-                        return div.get_text(separator='\n', strip=True)
+                
+                # 策略 1: 找 class 精确包含 'description__text' 的元素
+                for elem in soup.find_all(True):
+                    classes = elem.get('class', [])
+                    class_str = ' '.join(classes) if isinstance(classes, list) else str(classes)
+                    if 'description__text' in class_str:
+                        text = elem.get_text(separator='\n', strip=True)
+                        if len(text) > 100:
+                            logger.debug(f"  LinkedIn: 命中 description__text, 长度={len(text)}")
+                            return text
+                
+                # 策略 2: 找包含 section > div 结构的 description 容器
+                for elem in soup.find_all(True):
+                    classes = elem.get('class', [])
+                    class_str = ' '.join(classes) if isinstance(classes, list) else str(classes)
+                    if 'description' in class_str.lower():
+                        section = elem.find('section')
+                        if section:
+                            div = section.find('div')
+                            if div and len(div.get_text(strip=True)) > 100:
+                                logger.debug(f"  LinkedIn: 命中 description > section > div")
+                                return div.get_text(separator='\n', strip=True)
+                
+                # 策略 3: 找 "About the job" 标题，取它后面的内容
+                for heading in soup.find_all(['h2', 'h3', 'h4', 'span', 'div']):
+                    heading_text = heading.get_text(strip=True).lower()
+                    if 'about the job' in heading_text or 'job description' in heading_text:
+                        for sibling in heading.find_next_siblings():
+                            text = sibling.get_text(separator='\n', strip=True)
+                            if len(text) > 100:
+                                logger.debug(f"  LinkedIn: 命中 'About the job' 后续内容")
+                                return text
+                
+                # 策略 4: 兜底——找所有 div，取文本在 200-10000 字范围内最长的
+                candidates = []
+                for div in soup.find_all('div'):
+                    text = div.get_text(separator='\n', strip=True)
+                    if 200 < len(text) < 10000:
+                        candidates.append((len(text), text))
+                if candidates:
+                    candidates.sort(reverse=True)
+                    logger.debug(f"  LinkedIn: 兜底策略命中，最大块 {candidates[0][0]} 字符")
+                    return candidates[0][1]
+                
+                logger.debug(f"  LinkedIn: 所有策略都没命中 (job_id={job_id}), 页面长度={len(response.text)}")
+            else:
+                logger.debug(f"  LinkedIn jobPosting: HTTP {response.status_code} (job_id={job_id})")
+                
         except Exception as e:
             logger.debug(f"  获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
         return ''
     
     def get_indeed_description(self, job_url: str) -> str:
-        """获取 Indeed 单个岗位的完整职位描述"""
+        """获取 Indeed 单个岗位的完整职位描述
+        
+        多层备选 selector，因为 Indeed 页面结构会随版本变化：
+        - id='jobDescriptionText'          (旧版)
+        - class 含 'jobDescriptionText'    (部分版本)
+        - <div> 里包含 'Full job description' 附近的内容
+        - class 含 'css-' 前缀的大块文本区域（兜底）
+        """
         try:
             if self.config.scraperapi_key:
                 response = self.session.get(
@@ -383,9 +461,52 @@ class JobScraper:
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'lxml')
+                
+                # 策略 1: id='jobDescriptionText'（旧版，但仍然最准确）
                 desc_elem = soup.find('div', id='jobDescriptionText')
-                if desc_elem:
+                if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
+                    logger.debug("  Indeed: 命中 id=jobDescriptionText")
                     return desc_elem.get_text(separator='\n', strip=True)
+                
+                # 策略 2: class 里包含 'jobDescriptionText'
+                desc_elem = soup.find(attrs={'class': lambda c: c and 'jobDescriptionText' in str(c)})
+                if desc_elem and len(desc_elem.get_text(strip=True)) > 50:
+                    logger.debug("  Indeed: 命中 class=jobDescriptionText")
+                    return desc_elem.get_text(separator='\n', strip=True)
+                
+                # 策略 3: 找 "Full job description" 这个标题，取它后面的兄弟元素内容
+                for heading in soup.find_all(['h2', 'h3', 'h4', 'span', 'div']):
+                    if 'full job description' in heading.get_text(strip=True).lower():
+                        # 往后找第一个有实质内容的兄弟
+                        for sibling in heading.find_next_siblings():
+                            text = sibling.get_text(separator='\n', strip=True)
+                            if len(text) > 100:
+                                logger.debug("  Indeed: 命中 'Full job description' 后续内容")
+                                return text
+                        # 如果没有兄弟，看父容器里除了标题之外的内容
+                        parent = heading.parent
+                        if parent:
+                            text = parent.get_text(separator='\n', strip=True)
+                            if len(text) > 100:
+                                return text
+                
+                # 策略 4: 兜底——找所有 div，取文本最长且 > 200 字的那个
+                # （通常 JD 是页面上文本量最大的单个块）
+                candidates = []
+                for div in soup.find_all('div'):
+                    text = div.get_text(separator='\n', strip=True)
+                    # 排除整个页面的根容器（文本量太大的），只看 200-10000 范围
+                    if 200 < len(text) < 10000:
+                        candidates.append((len(text), text))
+                if candidates:
+                    candidates.sort(reverse=True)
+                    logger.debug(f"  Indeed: 兜底策略命中，最大块 {candidates[0][0]} 字符")
+                    return candidates[0][1]
+                
+                logger.debug(f"  Indeed: 所有策略都没命中，页面长度={len(response.text)}")
+            else:
+                logger.debug(f"  Indeed: HTTP {response.status_code} for {job_url}")
+                
         except Exception as e:
             logger.debug(f"  获取 Indeed 岗位详情失败 ({job_url}): {str(e)}")
         return ''
@@ -415,24 +536,20 @@ class ResumeAnalyzer:
         if not jobs:
             return []
         
-        # 准备批量分析的提示词
         jobs_summary = self._prepare_jobs_for_analysis(jobs)
         
         prompt = f"""
-你是一位专业的职业顾问和招聘专家。我将给你我的简历和一系列软件工程职位，请帮我：
+你是一位专业的职业顾问和招聘专家。请根据我的简历，从下面的岗位列表中筛选出最匹配的 5-10 个岗位并分析。
 
-1. 分析每个职位与我简历的匹配度（0-100分）
-2. 列出每个职位的优势和劣势
-3. 给出申请建议
-4. 按匹配度从高到低排序，选出前 5-10 个最佳匹配的职位
+注意：请直接从列表中挑选最好的岗位来分析，不需要对每个岗位都评分。只输出你选中的那些岗位的分析结果。
 
 我的简历：
 {resume}
 
-职位列表：
+岗位列表：
 {jobs_summary}
 
-请以 JSON 格式返回结果，格式如下：
+请以如下 JSON 格式返回结果（只返回 JSON，不要包含任何其他文字，不要加 markdown 代码块）：
 {{
     "top_matches": [
         {{
@@ -445,45 +562,48 @@ class ResumeAnalyzer:
         }}
     ]
 }}
-
-只返回 JSON，不要包含任何其他文字。
 """
         
         try:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "你是一位专业的职业顾问，擅长分析工作岗位和简历的匹配度。"},
+                    {"role": "system", "content": "你是一位专业的职业顾问。请只返回纯 JSON，不要加任何解释文字或 markdown 格式。"},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=4000
+                max_tokens=8000
             )
             
             result_text = response.choices[0].message.content.strip()
+            logger.info(f"DeepSeek 返回了 {len(result_text)} 个字符")
             
-            # 清理可能的 markdown 代码块标记
-            if result_text.startswith('```json'):
-                result_text = result_text[7:]
-            if result_text.startswith('```'):
-                result_text = result_text[3:]
-            if result_text.endswith('```'):
-                result_text = result_text[:-3]
+            # 清理 markdown 代码块标记（处理各种格式）
+            if '```json' in result_text:
+                result_text = result_text.split('```json')[1]
+            if '```' in result_text:
+                result_text = result_text.split('```')[0]
             result_text = result_text.strip()
             
-            analysis_result = json.loads(result_text)
+            # 尝试直接解析
+            try:
+                analysis_result = json.loads(result_text)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON 直接解析失败: {e}，尝试修复截断的 JSON...")
+                result_text = self._fix_truncated_json(result_text)
+                analysis_result = json.loads(result_text)
             
             # 将分析结果映射回原始岗位
             top_jobs = []
             for match in analysis_result.get('top_matches', [])[:10]:
-                job_idx = match['job_index']
-                if 0 <= job_idx < len(jobs):
+                job_idx = match.get('job_index')
+                if job_idx is not None and 0 <= job_idx < len(jobs):
                     job = jobs[job_idx].copy()
                     job['analysis'] = {
-                        'match_score': match['match_score'],
-                        'strengths': match['strengths'],
-                        'weaknesses': match['weaknesses'],
-                        'recommendation': match['recommendation'],
+                        'match_score': match.get('match_score', 0),
+                        'strengths': match.get('strengths', []),
+                        'weaknesses': match.get('weaknesses', []),
+                        'recommendation': match.get('recommendation', ''),
                         'key_skills_match': match.get('key_skills_match', [])
                     }
                     top_jobs.append(job)
@@ -493,20 +613,66 @@ class ResumeAnalyzer:
             
         except Exception as e:
             logger.error(f"DeepSeek 分析失败: {str(e)}")
-            # 如果 AI 分析失败，返回前10个岗位
             return jobs[:10]
     
+    def _fix_truncated_json(self, text: str) -> str:
+        """修复被 max_tokens 截断的 JSON
+        
+        截断最常见的断点：
+        - 在某个 object 内部断了  → 需要补 }]}
+        - 在 array 的两个 object 之间断了 → 需要补 ]}
+        - 在某个 string 值中间断了 → 需要补 "} 然后收尾
+        
+        策略：从后往前找到最后一个完整的 object（以 } 结尾），截断后面的，再补收尾标记
+        """
+        # 找到最后一个完整的 } 位置
+        last_brace = text.rfind('}')
+        if last_brace == -1:
+            raise ValueError("无法修复：没有找到任何完整的 JSON object")
+        
+        # 截到最后一个 }
+        text = text[:last_brace + 1]
+        
+        # 数一下未闭合的 [ 和 { 数量，然后依次补上
+        open_braces = text.count('{') - text.count('}')
+        open_brackets = text.count('[') - text.count(']')
+        
+        # 如果最后一个 } 后面应该还有 , 开头的下一条，去掉尾随的逗号
+        text = text.rstrip().rstrip(',')
+        
+        # 补上缺失的闭合标记
+        text += ']' * open_brackets + '}' * open_braces
+        
+        logger.info(f"JSON 修复完成，补充了 {open_brackets} 个 ] 和 {open_braces} 个 }}")
+        return text
+    
     def _prepare_jobs_for_analysis(self, jobs: List[Dict[str, Any]]) -> str:
-        """准备岗位信息用于分析"""
+        """准备岗位信息用于分析
+        
+        有 description 的放完整信息，无 description 的只放标题+公司省 token。
+        保持 index 和原始列表一致，这样 DeepSeek 返回的 job_index 才能正确映射。
+        """
         jobs_text = []
+        has_desc_count = 0
+        no_desc_count = 0
+        
         for idx, job in enumerate(jobs):
-            jobs_text.append(f"""
-职位 {idx}:
-标题: {job['title']}
-公司: {job['company']}
-地点: {job['location']}
-描述: {job.get('description', 'N/A')[:500]}...
-""")
+            desc = job.get('description', '').strip()
+            if desc:
+                has_desc_count += 1
+                jobs_text.append(
+                    f"职位 {idx}: {job['title']}\n"
+                    f"公司: {job['company']} | 地点: {job['location']}\n"
+                    f"描述: {desc[:500]}\n"
+                )
+            else:
+                no_desc_count += 1
+                # 无 description 的只放标题和公司，占用最少 token
+                jobs_text.append(
+                    f"职位 {idx}: {job['title']} @ {job['company']}（无详细描述）\n"
+                )
+        
+        logger.info(f"  准备分析素材: {has_desc_count} 条有 description, {no_desc_count} 条无 description")
         return '\n'.join(jobs_text)
 
 
