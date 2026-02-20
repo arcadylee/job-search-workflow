@@ -48,11 +48,8 @@ class JobSearchConfig:
         
         # 搜索参数
         self.search_keywords = [
-            'software development engineer',
-            'software engineer',
-            'backend engineer',
-            'full stack engineer',
-            'Java developer'
+            'product manager',
+            'project manager',
         ]
         self.location = 'Greater Vancouver, BC'
         self.distance_km = 50
