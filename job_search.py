@@ -49,7 +49,7 @@ class JobSearchConfig:
         # 搜索参数
         self.search_keywords = [
             'product manager',
-            'project manager',
+            'project manager'
         ]
         self.location = 'Greater Vancouver, BC'
         self.distance_km = 50
