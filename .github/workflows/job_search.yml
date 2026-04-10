@@ -1,78 +1,58 @@
 name: Daily Job Search
+
 on:
   schedule:
-    # PST 早上7点 = UTC 15:00
-    # PDT 早上7点 = UTC 14:00
-    - cron: '0 14 * * *'  # PDT 时间早上7点
-    - cron: '0 15 * * *'  # PST 时间早上7点
-  workflow_dispatch:  # 允许手动触发测试
+    - cron: '7 7 * * *'
+      timezone: 'America/Vancouver'
+  workflow_dispatch:
 
-# 设置并发控制，避免重复运行
 concurrency:
-  group: job-search-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   job-search:
     runs-on: ubuntu-latest
-    
-    # 设置超时时间为 45 分钟（Indeed 重试 + 逐条拿详情需要较长时间）
     timeout-minutes: 45
-    
-    # 设置权限
+
     permissions:
       contents: read
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'  # 缓存 pip 依赖，加速安装
-    
-    - name: Check timezone and skip if not 7 AM
-      id: check_time
-      run: |
-        current_hour=$(TZ='America/Los_Angeles' date +'%H')
-        echo "Current hour in Pacific Time: $current_hour"
-        if [ "$current_hour" == "07" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          echo "Running job search..."
-          echo "run_job=true" >> $GITHUB_OUTPUT
-        else
-          echo "Not 7 AM Pacific Time, skipping..."
-          echo "run_job=false" >> $GITHUB_OUTPUT
-        fi
-    
-    - name: Install dependencies
-      if: steps.check_time.outputs.run_job == 'true'
-      run: |
-        pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Run job search script
-      if: steps.check_time.outputs.run_job == 'true'
-      env:
-        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-        RESUME_CONTENT: ${{ secrets.RESUME_CONTENT }}
-        LATITUDE: ${{ secrets.LATITUDE }}
-        LONGITUDE: ${{ secrets.LONGITUDE }}
-      run: |
-        python job_search.py
-    
-    - name: Upload logs
-      if: always() && steps.check_time.outputs.run_job == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: job-search-logs-${{ github.run_number }}
-        path: |
-          *.log
-          jobs_*.json
-        retention-days: 30
-        if-no-files-found: warn
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run job search script
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
+          RESUME_CONTENT: ${{ secrets.RESUME_CONTENT }}
+          LATITUDE: ${{ secrets.LATITUDE }}
+          LONGITUDE: ${{ secrets.LONGITUDE }}
+        run: |
+          python job_search.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-search-logs-${{ github.run_number }}
+          path: |
+            *.log
+            jobs_*.json
+          retention-days: 30
+          if-no-files-found: warn
