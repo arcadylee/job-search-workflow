@@ -884,7 +884,38 @@ class EmailSender:
 </html>
 """
         return html
+        
+def make_job_key(job: Dict[str, Any]) -> str:
+    """生成岗位唯一 key，用于跨天去重"""
+    title = job.get('title', '').strip().lower()
+    company = job.get('company', '').strip().lower()
+    url = job.get('url', '').strip().lower()
+    location = job.get('location', '').strip().lower()
+    return f"{title}|{company}|{url or location}"
 
+
+def load_sent_job_history(filepath: str = '.job_history/sent_jobs.json') -> set:
+    """读取历史已发送岗位 key"""
+    if not os.path.exists(filepath):
+        return set()
+
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return set(data)
+    except Exception as e:
+        logger.warning(f"读取历史推荐失败: {str(e)}")
+        return set()
+
+
+def save_sent_job_history(job_keys: set, filepath: str = '.job_history/sent_jobs.json'):
+    """保存历史已发送岗位 key"""
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(sorted(list(job_keys)), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"保存历史推荐失败: {str(e)}")
 
 def main():
     """主函数"""
