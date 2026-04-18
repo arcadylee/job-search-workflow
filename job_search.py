@@ -935,10 +935,12 @@ def main():
         
         indeed_jobs = scraper.scrape_indeed()
         linkedin_jobs = scraper.scrape_linkedin()
+        vancouver_jobs = scraper.scrape_vancouver_jobs() if hasattr(scraper, 'scrape_vancouver_jobs') else []
         
-        all_jobs = indeed_jobs + linkedin_jobs
+        all_jobs = indeed_jobs + linkedin_jobs + vancouver_jobs
         logger.info(f"合并前总共 {len(all_jobs)} 个岗位")
         
+        # 单次运行内去重
         seen_keys = set()
         deduped_jobs = []
         for job in all_jobs:
@@ -954,6 +956,7 @@ def main():
             logger.warning("未找到任何岗位，脚本结束")
             return
         
+        # 过滤 Indeed 已过期岗位
         active_jobs = []
         expired_count = 0
         
@@ -985,15 +988,45 @@ def main():
             logger.warning("过滤过期岗位后没有剩余岗位，脚本结束")
             return
         
+        # 跨天去重：过滤历史已推荐岗位
+        sent_job_keys = load_sent_job_history()
+
+        new_jobs = []
+        duplicate_sent_count = 0
+
+        for job in all_jobs:
+            job_key = make_job_key(job)
+            if job_key in sent_job_keys:
+                duplicate_sent_count += 1
+                logger.info(f"  跳过历史已推荐岗位: {job['title']} | {job['company']}")
+                continue
+            new_jobs.append(job)
+
+        all_jobs = new_jobs
+        logger.info(f"过滤掉 {duplicate_sent_count} 个历史已推荐岗位，剩余 {len(all_jobs)} 个新岗位")
+        
+        if not all_jobs:
+            logger.warning("过滤历史推荐后没有剩余新岗位，脚本结束")
+            return
+        
+        # 保存当天抓取结果
         with open(f'jobs_{datetime.now().strftime("%Y%m%d")}.json', 'w', encoding='utf-8') as f:
             json.dump(all_jobs, f, ensure_ascii=False, indent=2)
         
+        # AI 分析
         analyzer = ResumeAnalyzer(config)
         top_jobs = analyzer.analyze_jobs(all_jobs, resume)
         
         if top_jobs:
+            # 发送邮件
             email_sender = EmailSender(config)
             email_sender.send_report(top_jobs)
+
+            # 更新已发送历史
+            for job in top_jobs:
+                sent_job_keys.add(make_job_key(job))
+            save_sent_job_history(sent_job_keys)
+
             logger.info(f"成功完成！发送了 {len(top_jobs)} 个岗位推荐")
         else:
             logger.warning("未找到匹配的岗位")
