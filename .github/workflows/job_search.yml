@@ -16,17 +16,26 @@ jobs:
     timeout-minutes: 45
 
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Ensure history directory exists
+        run: |
+          mkdir -p .job_history
+          if [ ! -f .job_history/sent_jobs.json ]; then
+            echo "[]" > .job_history/sent_jobs.json
+          fi
 
       - name: Install dependencies
         run: |
@@ -46,6 +55,14 @@ jobs:
         run: |
           python job_search.py
 
+      - name: Commit sent job history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .job_history/sent_jobs.json
+          git diff --cached --quiet || git commit -m "Update sent job history"
+          git push
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -54,5 +71,6 @@ jobs:
           path: |
             *.log
             jobs_*.json
+            .job_history/sent_jobs.json
           retention-days: 30
           if-no-files-found: warn
