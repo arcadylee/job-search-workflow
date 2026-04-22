@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Job Search Automation Script
-每天自动从 Indeed 和 LinkedIn 抓取大温哥华地区的产品/项目管理岗位，
-使用 DeepSeek AI 匹配简历，并将最佳匹配的岗位发送到邮箱。
+每天自动从 Indeed、LinkedIn 和 Vancouver 官方网站抓取岗位，
+按 3 个求职方向分别匹配对应简历，并将最佳匹配岗位汇总发送到邮箱。
 """
 
 import os
@@ -43,42 +43,64 @@ class JobSearchConfig:
     def __init__(self):
         # API Keys
         self.deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
-        self.scraperapi_key = os.getenv('SCRAPERAPI_KEY')  # 可选，用于避免被封
+        self.scraperapi_key = os.getenv('SCRAPERAPI_KEY')
 
         # Email 配置
         self.email_sender = os.getenv('EMAIL_SENDER')
         self.email_password = os.getenv('EMAIL_PASSWORD')
         self.email_recipient = os.getenv('EMAIL_RECIPIENT')
 
-        # 简历内容（GitHub Secrets）
-        self.resume_content = os.getenv('RESUME_CONTENT', '')
-
-        # 搜索参数
-        self.search_keywords = [
-            'product manager',
-            'project manager'
-        ]
-        self.location = 'Greater Vancouver, BC'
+        # 其他配置
         self.distance_km = 50
-
-        # 历史去重配置
-        self.history_file = '.job_history/sent_jobs.json'
         self.max_history = 1000
+        self.max_email_jobs_per_category = 5
 
-        # 邮件质量控制
-        self.min_match_score = 70
-        self.max_email_jobs = 10
-
-        # 温哥华经纬度（当前代码未强依赖，但保留）
+        # 温哥华经纬度（保留）
         self.vancouver_coords = {
             'latitude': float(os.getenv('LATITUDE')),
             'longitude': float(os.getenv('LONGITUDE'))
         }
 
+        # 三类岗位配置
+        self.job_categories = {
+            "pm": {
+                "display_name": "Product / Project / Program Management",
+                "resume": os.getenv("RESUME_PM_CONTENT", ""),
+                "keywords": [
+                    "product manager",
+                    "project manager",
+                    "program manager"
+                ],
+                "min_match_score": 70
+            },
+            "marketing": {
+                "display_name": "Marketing / Brand / Communications",
+                "resume": os.getenv("RESUME_MARKETING_CONTENT", ""),
+                "keywords": [
+                    "marketing manager",
+                    "brand manager",
+                    "communications manager",
+                    "communication manager"
+                ],
+                "min_match_score": 70
+            },
+            "admin": {
+                "display_name": "Administrative / IT Administration",
+                "resume": os.getenv("RESUME_ADMIN_CONTENT", ""),
+                "keywords": [
+                    "administrative assistant",
+                    "administrative coordinator",
+                    "office administrator",
+                    "it administrator",
+                    "it administration"
+                ],
+                "min_match_score": 65
+            }
+        }
+
         self.validate()
 
     def validate(self):
-        """验证必需配置"""
         required = {
             'DEEPSEEK_API_KEY': self.deepseek_api_key,
             'EMAIL_SENDER': self.email_sender,
@@ -106,12 +128,11 @@ class JobScraper:
             'Accept-Language': 'en-US,en;q=0.9',
         })
 
-    def scrape_indeed(self) -> List[Dict[str, Any]]:
-        """抓取 Indeed 上的工作岗位"""
+    def scrape_indeed(self, keywords: List[str], category_key: str) -> List[Dict[str, Any]]:
         jobs = []
-        logger.info("开始抓取 Indeed 岗位...")
+        logger.info(f"[{category_key}] 开始抓取 Indeed 岗位...")
 
-        for keyword in self.config.search_keywords:
+        for keyword in keywords:
             indeed_params = {
                 'q': keyword,
                 'l': 'Vancouver, BC',
@@ -136,34 +157,33 @@ class JobScraper:
                         response = self.session.get(target_url, timeout=30)
 
                     if response.status_code == 200:
-                        parsed = self._parse_indeed_results(response.text)
+                        parsed = self._parse_indeed_results(response.text, category_key)
                         jobs.extend(parsed)
-                        logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
+                        logger.info(f"  [{category_key}] 关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
                         break
                     elif response.status_code == 500 and attempt < 2:
-                        logger.warning(f"  Indeed 500错误 (关键词: {keyword})，第 {attempt + 1} 次重试...")
+                        logger.warning(f"  [{category_key}] Indeed 500错误 (关键词: {keyword})，第 {attempt + 1} 次重试...")
                         time.sleep(3 * (attempt + 1))
                     else:
-                        logger.warning(f"  Indeed 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
+                        logger.warning(f"  [{category_key}] Indeed 请求失败 (关键词: {keyword}): HTTP {response.status_code}")
                         break
 
                 except requests.exceptions.Timeout:
                     if attempt < 2:
-                        logger.warning(f"  Indeed 超时 (关键词: {keyword})，第 {attempt + 1} 次重试...")
+                        logger.warning(f"  [{category_key}] Indeed 超时 (关键词: {keyword})，第 {attempt + 1} 次重试...")
                         time.sleep(3)
                     else:
-                        logger.warning(f"  Indeed 持续超时 (关键词: {keyword})，放弃")
+                        logger.warning(f"  [{category_key}] Indeed 持续超时 (关键词: {keyword})，放弃")
                 except Exception as e:
-                    logger.warning(f"  Indeed 抓取错误 (关键词: {keyword}): {str(e)}")
+                    logger.warning(f"  [{category_key}] Indeed 抓取错误 (关键词: {keyword}): {str(e)}")
                     break
 
             time.sleep(2)
 
-        logger.info(f"从 Indeed 总共获取了 {len(jobs)} 个岗位")
+        logger.info(f"[{category_key}] Indeed 总共获取了 {len(jobs)} 个岗位")
         return jobs
 
-    def _parse_indeed_results(self, html: str) -> List[Dict[str, Any]]:
-        """解析 Indeed HTML 结果"""
+    def _parse_indeed_results(self, html: str, category_key: str) -> List[Dict[str, Any]]:
         jobs = []
         soup = BeautifulSoup(html, 'lxml')
         job_cards = soup.find_all('div', class_='job_seen_beacon')
@@ -215,6 +235,7 @@ class JobScraper:
 
                 jobs.append({
                     'source': 'Indeed',
+                    'category': category_key,
                     'title': title,
                     'company': company,
                     'location': location,
@@ -224,13 +245,12 @@ class JobScraper:
                 })
 
             except Exception as e:
-                logger.debug(f"解析 Indeed 岗位卡片失败: {str(e)}")
+                logger.debug(f"[{category_key}] 解析 Indeed 岗位卡片失败: {str(e)}")
                 continue
 
         return jobs
 
     def _extract_indeed_detail_url(self, href: str) -> str:
-        """从 Indeed 的 href 中提取岗位详情页 URL"""
         from urllib.parse import urlparse, parse_qs
 
         if not href:
@@ -244,22 +264,19 @@ class JobScraper:
             jk = qs.get('jk', [None])[0]
             if jk:
                 return f'https://ca.indeed.com/viewjob?jk={jk}'
-
-            logger.debug(f"  无法从 Indeed URL 提取 jk: {href[:80]}")
             return ''
         except Exception:
             return ''
 
-    def scrape_linkedin(self) -> List[Dict[str, Any]]:
-        """使用 LinkedIn jobs-guest 抓取岗位"""
+    def scrape_linkedin(self, keywords: List[str], category_key: str) -> List[Dict[str, Any]]:
         jobs = []
-        logger.info("开始抓取 LinkedIn 岗位...")
+        logger.info(f"[{category_key}] 开始抓取 LinkedIn 岗位...")
 
         geo_id = self._get_linkedin_geo_id('Vancouver')
         if not geo_id:
-            logger.warning("  无法获取 Vancouver 的 geoId，将使用 location 参数代替")
+            logger.warning(f"[{category_key}] 无法获取 Vancouver 的 geoId，将使用 location 参数代替")
 
-        for keyword in self.config.search_keywords:
+        for keyword in keywords:
             try:
                 search_url = 'https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search'
                 params = {
@@ -274,18 +291,18 @@ class JobScraper:
                 response = self.session.get(search_url, params=params, timeout=30)
 
                 if response.status_code == 200:
-                    parsed = self._parse_linkedin_results(response.text)
+                    parsed = self._parse_linkedin_results(response.text, category_key)
                     jobs.extend(parsed)
-                    logger.info(f"  关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
+                    logger.info(f"  [{category_key}] 关键词 '{keyword}' 获取了 {len(parsed)} 个岗位")
                 else:
-                    logger.warning(f"  LinkedIn search 失败 (关键词: {keyword}): HTTP {response.status_code}")
+                    logger.warning(f"  [{category_key}] LinkedIn search 失败 (关键词: {keyword}): HTTP {response.status_code}")
 
                 time.sleep(2)
 
             except requests.exceptions.Timeout:
-                logger.warning(f"  LinkedIn 超时 (关键词: {keyword})")
+                logger.warning(f"  [{category_key}] LinkedIn 超时 (关键词: {keyword})")
             except Exception as e:
-                logger.warning(f"  LinkedIn 抓取错误 (关键词: {keyword}): {str(e)}")
+                logger.warning(f"  [{category_key}] LinkedIn 抓取错误 (关键词: {keyword}): {str(e)}")
 
         seen_urls = set()
         unique_jobs = []
@@ -297,10 +314,10 @@ class JobScraper:
             elif not url:
                 unique_jobs.append(job)
 
-        logger.info(f"  去重前 {len(jobs)} 条 → 去重后 {len(unique_jobs)} 条")
+        logger.info(f"[{category_key}] LinkedIn 去重前 {len(jobs)} 条 → 去重后 {len(unique_jobs)} 条")
         jobs = unique_jobs
 
-        logger.info(f"  开始获取 LinkedIn 岗位详情（处理 {min(len(jobs), 20)} 条）...")
+        logger.info(f"[{category_key}] 开始获取 LinkedIn 岗位详情（处理 {min(len(jobs), 20)} 条）...")
         for job in jobs[:20]:
             job_id = self._extract_linkedin_job_id(job.get('url', ''))
             if job_id:
@@ -309,13 +326,12 @@ class JobScraper:
                     job['description'] = desc
                 time.sleep(1)
 
-        logger.info(f"从 LinkedIn 总共获取了 {len(jobs)} 个岗位")
+        logger.info(f"[{category_key}] LinkedIn 总共获取了 {len(jobs)} 个岗位")
         return jobs
 
-    def scrape_vancouver_jobs(self) -> List[Dict[str, Any]]:
-        """抓取 City of Vancouver 官方招聘网站岗位"""
+    def scrape_vancouver_jobs(self, keywords: List[str], category_key: str) -> List[Dict[str, Any]]:
         jobs = []
-        logger.info("开始抓取 Vancouver 官方岗位...")
+        logger.info(f"[{category_key}] 开始抓取 Vancouver 官方岗位...")
 
         base_url = "https://jobs.vancouver.ca/"
         seen_urls = set()
@@ -323,10 +339,11 @@ class JobScraper:
         try:
             response = self.session.get(base_url, timeout=30)
             if response.status_code != 200:
-                logger.warning(f"Vancouver jobs 请求失败: HTTP {response.status_code}")
+                logger.warning(f"[{category_key}] Vancouver jobs 请求失败: HTTP {response.status_code}")
                 return jobs
 
             soup = BeautifulSoup(response.text, 'lxml')
+            lower_keywords = [k.lower() for k in keywords]
 
             for link in soup.find_all('a', href=True):
                 title = link.get_text(" ", strip=True)
@@ -337,7 +354,7 @@ class JobScraper:
 
                 title_lower = title.lower()
 
-                if not any(k in title_lower for k in ['product', 'project', 'manager']):
+                if not any(k in title_lower for k in lower_keywords):
                     continue
 
                 if any(bad in title_lower for bad in ['login', 'search', 'home', 'apply now', 'sign in']):
@@ -354,6 +371,7 @@ class JobScraper:
 
                 jobs.append({
                     'source': 'Vancouver',
+                    'category': category_key,
                     'title': title,
                     'company': 'City of Vancouver',
                     'location': 'Vancouver, BC',
@@ -363,15 +381,14 @@ class JobScraper:
                 })
 
         except requests.exceptions.Timeout:
-            logger.warning("Vancouver jobs 请求超时")
+            logger.warning(f"[{category_key}] Vancouver jobs 请求超时")
         except Exception as e:
-            logger.warning(f"Vancouver jobs 抓取失败: {str(e)}")
+            logger.warning(f"[{category_key}] Vancouver jobs 抓取失败: {str(e)}")
 
-        logger.info(f"Vancouver Jobs 获取 {len(jobs)} 条")
+        logger.info(f"[{category_key}] Vancouver Jobs 获取 {len(jobs)} 条")
         return jobs
 
     def _get_linkedin_geo_id(self, city: str) -> str:
-        """查询 Vancouver 的 geoId"""
         try:
             url = 'https://www.linkedin.com/jobs-guest/api/typeaheadHits'
             params = {
@@ -386,14 +403,13 @@ class JobScraper:
                 hits = data.get('typeaheadHits', [])
                 for hit in hits:
                     if 'Vancouver' in hit.get('text', ''):
-                        logger.info(f"  获取到 Vancouver geoId: {hit['id']}")
+                        logger.info(f"获取到 Vancouver geoId: {hit['id']}")
                         return str(hit['id'])
         except Exception as e:
-            logger.debug(f"  获取 geoId 失败: {str(e)}")
+            logger.debug(f"获取 geoId 失败: {str(e)}")
         return ''
 
-    def _parse_linkedin_results(self, html: str) -> List[Dict[str, Any]]:
-        """解析 LinkedIn jobs-guest search 返回的 HTML"""
+    def _parse_linkedin_results(self, html: str, category_key: str) -> List[Dict[str, Any]]:
         jobs = []
         soup = BeautifulSoup(html, 'lxml')
         job_cards = soup.find_all('li')
@@ -419,6 +435,7 @@ class JobScraper:
 
                 jobs.append({
                     'source': 'LinkedIn',
+                    'category': category_key,
                     'title': title,
                     'company': company_elem.get_text(strip=True) if company_elem else 'Unknown',
                     'location': location_elem.get_text(strip=True) if location_elem else 'Unknown',
@@ -428,13 +445,12 @@ class JobScraper:
                 })
 
             except Exception as e:
-                logger.debug(f"  解析 LinkedIn 卡片失败: {str(e)}")
+                logger.debug(f"[{category_key}] 解析 LinkedIn 卡片失败: {str(e)}")
                 continue
 
         return jobs
 
     def _extract_linkedin_job_id(self, url: str) -> str:
-        """从 LinkedIn URL 提取 job_id"""
         if not url:
             return ''
         clean_url = url.split('?')[0]
@@ -444,7 +460,6 @@ class JobScraper:
         return ''
 
     def _get_linkedin_job_description(self, job_id: str) -> str:
-        """获取 LinkedIn 岗位 description"""
         try:
             url = f'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}'
             response = self.session.get(url, timeout=15)
@@ -491,16 +506,12 @@ class JobScraper:
                     candidates.sort(reverse=True)
                     return candidates[0][1]
 
-                logger.warning(f"  LinkedIn: 所有策略都没命中 (job_id={job_id}), 页面长度={len(response.text)}")
-            else:
-                logger.warning(f"  LinkedIn jobPosting: HTTP {response.status_code} (job_id={job_id})")
-
+            return ''
         except Exception as e:
-            logger.warning(f"  获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
-        return ''
+            logger.warning(f"获取 LinkedIn 岗位详情失败 (id={job_id}): {str(e)}")
+            return ''
 
     def get_indeed_page_html(self, job_url: str) -> str:
-        """获取 Indeed 详情页 HTML"""
         try:
             if self.config.scraperapi_key:
                 response = self.session.get(
@@ -516,26 +527,20 @@ class JobScraper:
                 response = self.session.get(job_url, timeout=30)
 
             if response.status_code != 200:
-                logger.warning(f"  Indeed 详情页 HTTP {response.status_code}: {job_url}")
+                logger.warning(f"Indeed 详情页 HTTP {response.status_code}: {job_url}")
                 return ''
 
-            page_len = len(response.text)
-            logger.info(f"  Indeed 详情页响应长度: {page_len} 字符 | {job_url.split('/')[-1]}")
-
-            if page_len < 500:
-                logger.warning(f"  Indeed 页面太短 ({page_len} 字符)，可能不是正常岗位页: {job_url}")
+            if len(response.text) < 500:
+                logger.warning(f"Indeed 页面太短，可能不是正常岗位页: {job_url}")
                 return ''
 
             return response.text
 
-        except requests.exceptions.Timeout:
-            logger.warning(f"  Indeed 详情页超时: {job_url}")
         except Exception as e:
-            logger.warning(f"  Indeed 详情页异常: {str(e)} | {job_url}")
-        return ''
+            logger.warning(f"Indeed 详情页异常: {str(e)} | {job_url}")
+            return ''
 
     def is_indeed_job_active(self, html: str) -> bool:
-        """检查 Indeed 岗位是否仍然有效"""
         if not html:
             return False
 
@@ -553,7 +558,6 @@ class JobScraper:
         return not any(marker in text for marker in expired_markers)
 
     def get_indeed_description_from_html(self, html: str, job_url: str = '') -> str:
-        """从已获取的 Indeed HTML 中提取职位描述"""
         try:
             if not html:
                 return ''
@@ -589,20 +593,12 @@ class JobScraper:
                 candidates.sort(reverse=True)
                 return candidates[0][1]
 
-            all_text = soup.get_text(strip=True)
-            logger.warning(f"  Indeed: 所有策略都没命中 | 页面总文本={len(all_text)} 字符 | 预览: {all_text[:200]}")
-
+            return ''
         except Exception as e:
-            logger.warning(f"  从 Indeed HTML 提取描述异常: {str(e)} | {job_url}")
-        return ''
-
-    def get_indeed_description(self, job_url: str) -> str:
-        """获取 Indeed 单个岗位完整描述"""
-        html = self.get_indeed_page_html(job_url)
-        return self.get_indeed_description_from_html(html, job_url)
+            logger.warning(f"从 Indeed HTML 提取描述异常: {str(e)} | {job_url}")
+            return ''
 
     def _build_query_string(self, params: Dict[str, Any]) -> str:
-        """构建查询字符串"""
         return '&'.join([f"{k}={v}" for k, v in params.items()])
 
 
@@ -610,8 +606,6 @@ class JobScraper:
 # Analyzer
 # =========================
 class ResumeAnalyzer:
-    """简历匹配分析器 - 使用 DeepSeek AI"""
-
     def __init__(self, config: JobSearchConfig):
         self.config = config
         self.client = OpenAI(
@@ -619,8 +613,7 @@ class ResumeAnalyzer:
             base_url="https://api.deepseek.com"
         )
 
-    def analyze_jobs(self, jobs: List[Dict[str, Any]], resume: str) -> List[Dict[str, Any]]:
-        """分析岗位与简历的匹配度"""
+    def analyze_jobs(self, jobs: List[Dict[str, Any]], resume: str, max_jobs: int) -> List[Dict[str, Any]]:
         logger.info(f"开始使用 DeepSeek 分析 {len(jobs)} 个岗位...")
 
         if not jobs:
@@ -629,9 +622,12 @@ class ResumeAnalyzer:
         jobs_summary = self._prepare_jobs_for_analysis(jobs)
 
         prompt = f"""
-你是一位专业的职业顾问和招聘专家。请根据我的简历，从下面的岗位列表中筛选出最匹配的 5-10 个岗位并分析。
+你是一位专业的职业顾问和招聘专家。请根据我的简历，从下面的岗位列表中筛选出最匹配的岗位并分析。
 
-注意：请直接从列表中挑选最好的岗位来分析，不需要对每个岗位都评分。只输出你选中的那些岗位的分析结果。
+注意：
+1. 请直接从列表中挑选最好的岗位来分析，不需要对每个岗位都评分。
+2. 输出数量不超过 {max_jobs} 个。
+3. 只返回 JSON，不要包含任何其他文字。
 
 我的简历：
 {resume}
@@ -639,7 +635,7 @@ class ResumeAnalyzer:
 岗位列表：
 {jobs_summary}
 
-请以如下 JSON 格式返回结果（只返回 JSON，不要包含任何其他文字，不要加 markdown 代码块）：
+请以如下 JSON 格式返回结果：
 {{
     "top_matches": [
         {{
@@ -666,7 +662,6 @@ class ResumeAnalyzer:
             )
 
             result_text = response.choices[0].message.content.strip()
-            logger.info(f"DeepSeek 返回了 {len(result_text)} 个字符")
 
             if '```json' in result_text:
                 result_text = result_text.split('```json')[1]
@@ -676,13 +671,12 @@ class ResumeAnalyzer:
 
             try:
                 analysis_result = json.loads(result_text)
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON 直接解析失败: {e}，尝试修复截断的 JSON...")
+            except json.JSONDecodeError:
                 result_text = self._fix_truncated_json(result_text)
                 analysis_result = json.loads(result_text)
 
             top_jobs = []
-            for match in analysis_result.get('top_matches', [])[:self.config.max_email_jobs]:
+            for match in analysis_result.get('top_matches', [])[:max_jobs]:
                 job_idx = match.get('job_index')
                 if job_idx is not None and 0 <= job_idx < len(jobs):
                     job = jobs[job_idx].copy()
@@ -700,10 +694,9 @@ class ResumeAnalyzer:
 
         except Exception as e:
             logger.error(f"DeepSeek 分析失败: {str(e)}")
-            return jobs[:self.config.max_email_jobs]
+            return jobs[:max_jobs]
 
     def _fix_truncated_json(self, text: str) -> str:
-        """修复被 max_tokens 截断的 JSON"""
         last_brace = text.rfind('}')
         if last_brace == -1:
             raise ValueError("无法修复：没有找到任何完整的 JSON object")
@@ -713,32 +706,22 @@ class ResumeAnalyzer:
         open_brackets = text.count('[') - text.count(']')
         text = text.rstrip().rstrip(',')
         text += ']' * open_brackets + '}' * open_braces
-
-        logger.info(f"JSON 修复完成，补充了 {open_brackets} 个 ] 和 {open_braces} 个 }}")
         return text
 
     def _prepare_jobs_for_analysis(self, jobs: List[Dict[str, Any]]) -> str:
-        """准备岗位信息用于分析"""
         jobs_text = []
-        has_desc_count = 0
-        no_desc_count = 0
-
         for idx, job in enumerate(jobs):
             desc = job.get('description', '').strip()
             if desc:
-                has_desc_count += 1
                 jobs_text.append(
                     f"职位 {idx}: {job['title']}\n"
                     f"公司: {job['company']} | 地点: {job['location']}\n"
                     f"描述: {desc[:500]}\n"
                 )
             else:
-                no_desc_count += 1
                 jobs_text.append(
                     f"职位 {idx}: {job['title']} @ {job['company']}（无详细描述）\n"
                 )
-
-        logger.info(f"  准备分析素材: {has_desc_count} 条有 description, {no_desc_count} 条无 description")
         return '\n'.join(jobs_text)
 
 
@@ -746,18 +729,27 @@ class ResumeAnalyzer:
 # Email
 # =========================
 class EmailSender:
-    """邮件发送器"""
-
     def __init__(self, config: JobSearchConfig):
         self.config = config
 
-    def send_report(self, jobs: List[Dict[str, Any]]):
-        """发送工作岗位报告到邮箱"""
-        logger.info(f"准备发送邮件，包含 {len(jobs)} 个岗位...")
-        html_content = self._create_html_report(jobs)
+    def send_combined_report(self, category_results: Dict[str, Dict[str, Any]]):
+        total_jobs = sum(len(v["jobs"]) for v in category_results.values())
+        logger.info(f"准备发送汇总邮件，总岗位数 {total_jobs}")
+
+        html_content = self._create_combined_html_report(category_results)
+
+        subject_parts = []
+        for _, data in category_results.items():
+            if data["jobs"]:
+                subject_parts.append(f'{data["short_name"]} ({len(data["jobs"])})')
+
+        if subject_parts:
+            subject_suffix = " | ".join(subject_parts)
+        else:
+            subject_suffix = "No qualified jobs"
 
         msg = MIMEMultipart('alternative')
-        msg['Subject'] = f'每日工作推荐 - {len(jobs)} 个高匹配度岗位 ({datetime.now().strftime("%Y-%m-%d")})'
+        msg['Subject'] = f'Daily Job Matches — {subject_suffix} ({datetime.now().strftime("%Y-%m-%d")})'
         msg['From'] = self.config.email_sender
         msg['To'] = self.config.email_recipient
 
@@ -768,14 +760,13 @@ class EmailSender:
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
                 server.login(self.config.email_sender, self.config.email_password)
                 server.send_message(msg)
-
-            logger.info("邮件发送成功！")
-
+            logger.info("汇总邮件发送成功！")
         except Exception as e:
             logger.error(f"邮件发送失败: {str(e)}")
 
-    def _create_html_report(self, jobs: List[Dict[str, Any]]) -> str:
-        """创建 HTML 格式的工作报告"""
+    def _create_combined_html_report(self, category_results: Dict[str, Dict[str, Any]]) -> str:
+        total_jobs = sum(len(v["jobs"]) for v in category_results.values())
+
         html = f"""
 <!DOCTYPE html>
 <html>
@@ -786,7 +777,7 @@ class EmailSender:
             font-family: Arial, sans-serif;
             line-height: 1.6;
             color: #333;
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 20px;
         }}
@@ -796,6 +787,17 @@ class EmailSender:
             padding: 20px;
             border-radius: 10px;
             margin-bottom: 30px;
+        }}
+        .category-section {{
+            margin-bottom: 40px;
+        }}
+        .category-title {{
+            font-size: 24px;
+            font-weight: bold;
+            margin: 24px 0 12px 0;
+            color: #2c3e50;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 8px;
         }}
         .job-card {{
             border: 1px solid #ddd;
@@ -829,21 +831,6 @@ class EmailSender:
             font-weight: bold;
             margin-bottom: 15px;
         }}
-        .strengths, .weaknesses {{
-            margin: 10px 0;
-        }}
-        .strengths h4 {{
-            color: #27ae60;
-            margin-bottom: 5px;
-        }}
-        .weaknesses h4 {{
-            color: #e74c3c;
-            margin-bottom: 5px;
-        }}
-        ul {{
-            margin: 5px 0;
-            padding-left: 20px;
-        }}
         .recommendation {{
             background: #ecf0f1;
             padding: 15px;
@@ -859,6 +846,11 @@ class EmailSender:
             border-radius: 5px;
             margin-top: 10px;
         }}
+        .empty-note {{
+            color: #888;
+            font-style: italic;
+            padding: 10px 0 20px 0;
+        }}
         .footer {{
             text-align: center;
             margin-top: 40px;
@@ -866,75 +858,86 @@ class EmailSender:
             border-top: 1px solid #ddd;
             color: #7f8c8d;
         }}
+        ul {{
+            margin: 5px 0;
+            padding-left: 20px;
+        }}
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🎯 每日工作推荐</h1>
-        <p>{datetime.now().strftime("%Y年%m月%d日")} - 为您精选 {len(jobs)} 个高匹配度岗位</p>
+        <h1>🎯 Daily Job Matches</h1>
+        <p>{datetime.now().strftime("%Y-%m-%d")} — {total_jobs} qualified matches across all categories</p>
     </div>
 """
 
-        for idx, job in enumerate(jobs, 1):
-            analysis = job.get('analysis', {})
-            match_score = analysis.get('match_score', 0)
+        for _, data in category_results.items():
+            display_name = data["display_name"]
+            jobs = data["jobs"]
 
-            html += f"""
+            html += f'<div class="category-section"><div class="category-title">{display_name}</div>'
+
+            if not jobs:
+                html += '<div class="empty-note">No qualified new jobs today.</div></div>'
+                continue
+
+            for idx, job in enumerate(jobs, 1):
+                analysis = job.get('analysis', {})
+                match_score = analysis.get('match_score', 0)
+
+                html += f"""
     <div class="job-card">
         <div class="job-title">#{idx} {job['title']}</div>
         <div class="company">🏢 {job['company']}</div>
         <div class="location">📍 {job['location']}</div>
-        <div class="match-score">匹配度: {match_score}%</div>
+        <div class="match-score">Match Score: {match_score}%</div>
 
-        <div class="strengths">
-            <h4>✅ 优势：</h4>
+        <div><strong>Source:</strong> {job.get('source', 'Unknown')}</div>
+
+        <div style="margin-top: 10px;">
+            <strong>Strengths:</strong>
             <ul>
 """
-            for strength in analysis.get('strengths', []):
-                html += f"                <li>{strength}</li>\n"
+                for strength in analysis.get('strengths', []):
+                    html += f"<li>{strength}</li>"
 
-            html += """
+                html += """
             </ul>
         </div>
 
-        <div class="weaknesses">
-            <h4>⚠️ 注意事项：</h4>
+        <div>
+            <strong>Weaknesses:</strong>
             <ul>
 """
-            for weakness in analysis.get('weaknesses', []):
-                html += f"                <li>{weakness}</li>\n"
+                for weakness in analysis.get('weaknesses', []):
+                    html += f"<li>{weakness}</li>"
 
-            html += f"""
+                html += f"""
             </ul>
         </div>
 
         <div class="recommendation">
-            <strong>💡 建议：</strong> {analysis.get('recommendation', '建议申请')}
+            <strong>Recommendation:</strong> {analysis.get('recommendation', 'Consider applying')}
         </div>
-
-        <div style="margin: 12px 0; padding: 10px; background: #fff; border-radius: 6px; border-left: 3px solid #667eea; font-size: 14px; color: #555;">
 """
-            desc = job.get('description', '').strip()
-            if desc:
-                preview = desc[:150].replace('\n', ' ').strip()
-                if len(desc) > 150:
-                    preview += '...'
-                html += f'            <strong>📋 岗位描述：</strong> {preview}\n'
-            elif job['source'] == 'Indeed':
-                html += '            <strong>📋 岗位描述：</strong> 点击下方"立即申请"按钮查看完整职位描述\n'
-            else:
-                html += '            <strong>📋 岗位描述：</strong> 请访问原帖查看详情\n'
 
-            html += f"""        </div>
+                desc = job.get('description', '').strip()
+                if desc:
+                    preview = desc[:180].replace('\n', ' ').strip()
+                    if len(desc) > 180:
+                        preview += '...'
+                    html += f'<div><strong>Description Preview:</strong> {preview}</div>'
 
-        <a href="{job['url']}" class="apply-button" target="_blank">立即申请 →</a>
+                html += f"""
+        <a href="{job['url']}" class="apply-button" target="_blank">View Job →</a>
     </div>
 """
+            html += '</div>'
 
         html += """
     <div class="footer">
-        <p>本报告由自动化脚本生成 | Powered by DeepSeek AI</p>
-        <p>祝您求职顺利！🚀</p>
+        <p>This report was generated automatically | Powered by DeepSeek AI</p>
+        <p>Good luck with your job search! 🚀</p>
     </div>
 </body>
 </html>
@@ -943,10 +946,9 @@ class EmailSender:
 
 
 # =========================
-# History Helpers
+# Helpers
 # =========================
 def make_job_key(job: Dict[str, Any]) -> str:
-    """生成更稳定的岗位唯一 key，优先使用 URL"""
     url = job.get('url', '').strip().lower()
     if url:
         return url
@@ -956,25 +958,35 @@ def make_job_key(job: Dict[str, Any]) -> str:
     return f"{title}|{company}"
 
 
-def load_sent_job_history(filepath: str = '.job_history/sent_jobs.json') -> List[str]:
-    """读取历史已发送岗位 key，保留顺序"""
+def dedupe_jobs(jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen_keys = set()
+    deduped = []
+    for job in jobs:
+        key = make_job_key(job)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(job)
+    return deduped
+
+
+def get_history_file(category_key: str) -> str:
+    return f'.job_history/sent_jobs_{category_key}.json'
+
+
+def load_sent_job_history(filepath: str) -> List[str]:
     if not os.path.exists(filepath):
         return []
 
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-
-        if isinstance(data, list):
-            return data
-        return []
+        return data if isinstance(data, list) else []
     except Exception as e:
         logger.warning(f"读取历史推荐失败: {str(e)}")
         return []
 
 
-def save_sent_job_history(job_keys: List[str], filepath: str = '.job_history/sent_jobs.json'):
-    """保存历史已发送岗位 key"""
+def save_sent_job_history(job_keys: List[str], filepath: str):
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -984,7 +996,6 @@ def save_sent_job_history(job_keys: List[str], filepath: str = '.job_history/sen
 
 
 def append_unique_job_keys(existing_keys: List[str], new_keys: List[str], max_history: int) -> List[str]:
-    """追加去重并限制历史长度"""
     merged = list(existing_keys)
     seen = set(existing_keys)
 
@@ -999,139 +1010,167 @@ def append_unique_job_keys(existing_keys: List[str], new_keys: List[str], max_hi
     return merged
 
 
+def filter_expired_indeed_jobs(jobs: List[Dict[str, Any]], scraper: JobScraper) -> List[Dict[str, Any]]:
+    active_jobs = []
+    expired_count = 0
+
+    for job in jobs:
+        if job['source'] != 'Indeed' or not job.get('url'):
+            active_jobs.append(job)
+            continue
+
+        html = scraper.get_indeed_page_html(job['url'])
+        if not scraper.is_indeed_job_active(html):
+            expired_count += 1
+            logger.info(f"跳过已过期 Indeed 岗位: {job['title']} | {job['company']}")
+            time.sleep(1)
+            continue
+
+        if len(job.get('description', '')) < 200:
+            full_desc = scraper.get_indeed_description_from_html(html, job['url'])
+            if full_desc and len(full_desc) > len(job.get('description', '')):
+                job['description'] = full_desc
+
+        active_jobs.append(job)
+        time.sleep(1)
+
+    logger.info(f"过滤掉 {expired_count} 个已过期 Indeed 岗位，剩余 {len(active_jobs)} 个岗位")
+    return active_jobs
+
+
+def filter_sent_history(jobs: List[Dict[str, Any]], category_key: str) -> (List[Dict[str, Any]], List[str]):
+    history_file = get_history_file(category_key)
+    sent_keys = load_sent_job_history(history_file)
+    sent_key_set = set(sent_keys)
+
+    new_jobs = []
+    duplicate_sent_count = 0
+
+    for job in jobs:
+        job_key = make_job_key(job)
+        if job_key in sent_key_set:
+            duplicate_sent_count += 1
+            logger.info(f"[{category_key}] 跳过历史已推荐岗位: {job['title']} | {job['company']}")
+            continue
+        new_jobs.append(job)
+
+    logger.info(f"[{category_key}] 过滤掉 {duplicate_sent_count} 个历史已推荐岗位，剩余 {len(new_jobs)} 个新岗位")
+    return new_jobs, sent_keys
+
+
 # =========================
 # Main
 # =========================
 def main():
-    """主函数"""
     logger.info("=" * 60)
     logger.info("开始每日工作搜索...")
     logger.info("=" * 60)
 
     try:
         config = JobSearchConfig()
-
-        resume = config.resume_content
-        if not resume:
-            logger.warning("未提供简历内容，将使用默认简历模板")
-            resume = "Product manager with experience in SaaS, platform strategy, analytics, and cross-functional delivery."
-
         scraper = JobScraper(config)
-
-        indeed_jobs = scraper.scrape_indeed()
-        linkedin_jobs = scraper.scrape_linkedin()
-        vancouver_jobs = scraper.scrape_vancouver_jobs()
-
-        all_jobs = indeed_jobs + linkedin_jobs + vancouver_jobs
-        logger.info(f"合并前总共 {len(all_jobs)} 个岗位")
-
-        # 单次运行内去重
-        seen_keys = set()
-        deduped_jobs = []
-        for job in all_jobs:
-            key = (job['title'].lower()[:30], job['company'].lower())
-            if key not in seen_keys:
-                seen_keys.add(key)
-                deduped_jobs.append(job)
-
-        all_jobs = deduped_jobs
-        logger.info(f"去重后剩余 {len(all_jobs)} 个岗位")
-
-        if not all_jobs:
-            logger.warning("未找到任何岗位，脚本结束")
-            return
-
-        # 过滤 Indeed 已过期岗位并补充描述
-        active_jobs = []
-        expired_count = 0
-
-        logger.info("开始过滤 Indeed 已过期岗位并补充详情...")
-        for job in all_jobs:
-            if job['source'] != 'Indeed' or not job.get('url'):
-                active_jobs.append(job)
-                continue
-
-            html = scraper.get_indeed_page_html(job['url'])
-            if not scraper.is_indeed_job_active(html):
-                expired_count += 1
-                logger.info(f"  跳过已过期 Indeed 岗位: {job['title']} | {job['company']}")
-                time.sleep(1)
-                continue
-
-            if len(job.get('description', '')) < 200:
-                full_desc = scraper.get_indeed_description_from_html(html, job['url'])
-                if full_desc and len(full_desc) > len(job.get('description', '')):
-                    job['description'] = full_desc
-
-            active_jobs.append(job)
-            time.sleep(1)
-
-        all_jobs = active_jobs
-        logger.info(f"过滤掉 {expired_count} 个已过期 Indeed 岗位，剩余 {len(all_jobs)} 个岗位")
-
-        if not all_jobs:
-            logger.warning("过滤过期岗位后没有剩余岗位，脚本结束")
-            return
-
-        # 跨天去重
-        sent_job_keys = load_sent_job_history(config.history_file)
-        sent_job_key_set = set(sent_job_keys)
-
-        new_jobs = []
-        duplicate_sent_count = 0
-
-        for job in all_jobs:
-            job_key = make_job_key(job)
-            if job_key in sent_job_key_set:
-                duplicate_sent_count += 1
-                logger.info(f"  跳过历史已推荐岗位: {job['title']} | {job['company']}")
-                continue
-            new_jobs.append(job)
-
-        all_jobs = new_jobs
-        logger.info(f"过滤掉 {duplicate_sent_count} 个历史已推荐岗位，剩余 {len(all_jobs)} 个新岗位")
-
-        if not all_jobs:
-            logger.warning("过滤历史推荐后没有剩余新岗位，脚本结束")
-            return
-
-        # 保存当天抓取结果
-        with open(f'jobs_{datetime.now().strftime("%Y%m%d")}.json', 'w', encoding='utf-8') as f:
-            json.dump(all_jobs, f, ensure_ascii=False, indent=2)
-
-        # AI 分析
         analyzer = ResumeAnalyzer(config)
-        top_jobs = analyzer.analyze_jobs(all_jobs, resume)
 
-        # 只保留高质量岗位
-        filtered_top_jobs = [
-            job for job in top_jobs
-            if job.get('analysis', {}).get('match_score', 0) >= config.min_match_score
-        ]
-        filtered_top_jobs = filtered_top_jobs[:config.max_email_jobs]
+        category_results: Dict[str, Dict[str, Any]] = {}
 
-        logger.info(
-            f"AI 推荐 {len(top_jobs)} 个岗位，过滤到 {len(filtered_top_jobs)} 个 "
-            f"(最低匹配度 {config.min_match_score})"
-        )
+        for category_key, category_cfg in config.job_categories.items():
+            logger.info("=" * 30)
+            logger.info(f"处理类别: {category_key} / {category_cfg['display_name']}")
+            logger.info("=" * 30)
 
-        if filtered_top_jobs:
-            # 发送邮件
-            email_sender = EmailSender(config)
-            email_sender.send_report(filtered_top_jobs)
+            resume = category_cfg["resume"]
+            keywords = category_cfg["keywords"]
+            min_match_score = category_cfg["min_match_score"]
 
-            # 更新历史，限制大小
-            new_sent_keys = [make_job_key(job) for job in filtered_top_jobs]
-            updated_history = append_unique_job_keys(
-                existing_keys=sent_job_keys,
-                new_keys=new_sent_keys,
-                max_history=config.max_history
+            if not resume:
+                logger.warning(f"[{category_key}] 未提供对应简历，跳过该类别")
+                category_results[category_key] = {
+                    "display_name": category_cfg["display_name"],
+                    "short_name": category_key.upper(),
+                    "jobs": []
+                }
+                continue
+
+            indeed_jobs = scraper.scrape_indeed(keywords, category_key)
+            linkedin_jobs = scraper.scrape_linkedin(keywords, category_key)
+            vancouver_jobs = scraper.scrape_vancouver_jobs(keywords, category_key)
+
+            all_jobs = indeed_jobs + linkedin_jobs + vancouver_jobs
+            logger.info(f"[{category_key}] 合并前总共 {len(all_jobs)} 个岗位")
+
+            all_jobs = dedupe_jobs(all_jobs)
+            logger.info(f"[{category_key}] 去重后剩余 {len(all_jobs)} 个岗位")
+
+            if not all_jobs:
+                category_results[category_key] = {
+                    "display_name": category_cfg["display_name"],
+                    "short_name": category_key.upper(),
+                    "jobs": []
+                }
+                continue
+
+            all_jobs = filter_expired_indeed_jobs(all_jobs, scraper)
+
+            if not all_jobs:
+                category_results[category_key] = {
+                    "display_name": category_cfg["display_name"],
+                    "short_name": category_key.upper(),
+                    "jobs": []
+                }
+                continue
+
+            all_jobs, sent_keys = filter_sent_history(all_jobs, category_key)
+
+            if not all_jobs:
+                category_results[category_key] = {
+                    "display_name": category_cfg["display_name"],
+                    "short_name": category_key.upper(),
+                    "jobs": []
+                }
+                continue
+
+            with open(f'jobs_{category_key}_{datetime.now().strftime("%Y%m%d")}.json', 'w', encoding='utf-8') as f:
+                json.dump(all_jobs, f, ensure_ascii=False, indent=2)
+
+            analyzed_jobs = analyzer.analyze_jobs(
+                jobs=all_jobs,
+                resume=resume,
+                max_jobs=config.max_email_jobs_per_category
             )
-            save_sent_job_history(updated_history, config.history_file)
 
-            logger.info(f"成功完成！发送了 {len(filtered_top_jobs)} 个岗位推荐")
+            filtered_jobs = [
+                job for job in analyzed_jobs
+                if job.get('analysis', {}).get('match_score', 0) >= min_match_score
+            ][:config.max_email_jobs_per_category]
+
+            logger.info(
+                f"[{category_key}] AI 推荐 {len(analyzed_jobs)} 个岗位，"
+                f"过滤到 {len(filtered_jobs)} 个 (最低匹配度 {min_match_score})"
+            )
+
+            category_results[category_key] = {
+                "display_name": category_cfg["display_name"],
+                "short_name": category_key.upper(),
+                "jobs": filtered_jobs
+            }
+
+            if filtered_jobs:
+                new_sent_keys = [make_job_key(job) for job in filtered_jobs]
+                updated_history = append_unique_job_keys(
+                    existing_keys=sent_keys,
+                    new_keys=new_sent_keys,
+                    max_history=config.max_history
+                )
+                save_sent_job_history(updated_history, get_history_file(category_key))
+
+        total_jobs = sum(len(v["jobs"]) for v in category_results.values())
+
+        if total_jobs > 0:
+            email_sender = EmailSender(config)
+            email_sender.send_combined_report(category_results)
+            logger.info(f"成功完成！共发送 {total_jobs} 个岗位推荐")
         else:
-            logger.warning("没有达到最低匹配度要求的岗位，未发送邮件")
+            logger.warning("今天没有符合条件的新岗位，未发送邮件")
 
     except Exception as e:
         logger.error(f"脚本执行失败: {str(e)}", exc_info=True)
