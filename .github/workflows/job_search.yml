@@ -34,9 +34,11 @@ jobs:
       - name: Ensure history directory exists
         run: |
           mkdir -p .job_history
-          if [ ! -f .job_history/sent_jobs.json ]; then
-            echo "[]" > .job_history/sent_jobs.json
-          fi
+          for file in sent_jobs_pm.json sent_jobs_marketing.json sent_jobs_admin.json; do
+            if [ ! -f ".job_history/$file" ]; then
+              echo "[]" > ".job_history/$file"
+            fi
+          done
 
       - name: Install dependencies
         run: |
@@ -50,7 +52,9 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-          RESUME_CONTENT: ${{ secrets.RESUME_CONTENT }}
+          RESUME_PM_CONTENT: ${{ secrets.RESUME_PM_CONTENT }}
+          RESUME_MARKETING_CONTENT: ${{ secrets.RESUME_MARKETING_CONTENT }}
+          RESUME_ADMIN_CONTENT: ${{ secrets.RESUME_ADMIN_CONTENT }}
           LATITUDE: ${{ secrets.LATITUDE }}
           LONGITUDE: ${{ secrets.LONGITUDE }}
         run: |
@@ -62,7 +66,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .job_history/sent_jobs.json
+          git add .job_history/sent_jobs_pm.json
+          git add .job_history/sent_jobs_marketing.json
+          git add .job_history/sent_jobs_admin.json
 
           if ! git diff --cached --quiet; then
             git commit -m "Update sent job history"
@@ -79,6 +85,6 @@ jobs:
           path: |
             *.log
             jobs_*.json
-            .job_history/sent_jobs.json
+            .job_history/*.json
           retention-days: 30
           if-no-files-found: warn
